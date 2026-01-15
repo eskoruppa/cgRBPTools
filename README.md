@@ -1,17 +1,7 @@
-# REPO_TEMPLATE
-Template for repos
+# cgRBPtools
+Python toolset mapping, backmapping, and analyzing cgRBP 
 
-Add Submodule
-```console
-git submodule add git@github.com:eskoruppa/<reponame> path/name
-git submodule update --init --recursive
-```
-Update all repos
-```console
-git submodule update --recursive --remote
-```
-
-Clone with all submodules
+Clone repository
 ```console
 git clone --recurse-submodules -j8 git@github.com:eskoruppa/cgStiff.git
 ```
