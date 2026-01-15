@@ -1,0 +1,3 @@
+[submodule "cgrbptools/SO3"]
+	path = cgrbptools/SO3
+	url = git@github.com:eskoruppa/SO3
