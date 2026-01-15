@@ -9,6 +9,7 @@ git clone --recurse-submodules -j8 git@github.com:eskoruppa/cgRBPTools.git
 
 
 ### Default output 
+There are two standard dump formats for RBP atoms. To utilize parsers and conversion tools provided in this package these formats have to be observed.
 
 Full
 ```
