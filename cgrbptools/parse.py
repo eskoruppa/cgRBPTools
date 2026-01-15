@@ -31,12 +31,12 @@ def parse_out(filepath: str) -> dict:
         RuntimeError: For other unexpected parsing errors.
     """
     all_timesteps = []
-    all_atom_data_2d_frames = [] # Will store (A, C) arrays for each frame
+    all_atom_data_2d_frames = []
     
     initial_num_atoms = -1
     initial_num_cols_per_atom = -1
     dumped_column_names = None
-    initial_box_data = None # Store box from the first frame
+    initial_box_data = None 
 
     try:
         with open(filepath, 'r') as f:
@@ -65,8 +65,6 @@ def parse_out(filepath: str) -> dict:
                 y_line = list(map(float, f.readline().strip().split()))
                 z_line = list(map(float, f.readline().strip().split()))
 
-                # Standardize box representation to always be 9 elements:
-                # [xlo, xhi, ylo, yhi, zlo, zhi, xy, xz, yz]
                 current_box_array = np.zeros(9, dtype=float)
                 if "xy xz yz" in box_type_str: # Triclinic box
                     if not (len(x_line) == 3 and len(y_line) == 3 and len(z_line) == 3):
@@ -74,27 +72,24 @@ def parse_out(filepath: str) -> dict:
                     current_box_array[0], current_box_array[1], current_box_array[6] = x_line
                     current_box_array[2], current_box_array[3], current_box_array[7] = y_line
                     current_box_array[4], current_box_array[5], current_box_array[8] = z_line
-                else: # Orthogonal box
+                else: 
                     if not (len(x_line) == 2 and len(y_line) == 2 and len(z_line) == 2):
                         raise ValueError("Orthogonal box bounds expected 2 values per line (lo, hi)")
                     current_box_array[0], current_box_array[1] = x_line
                     current_box_array[2], current_box_array[3] = y_line
                     current_box_array[4], current_box_array[5] = z_line
-                    # xy, xz, yz remain 0.0
 
-                # ITEM: ATOMS header (column names)
                 line = f.readline()
                 if not line.startswith("ITEM: ATOMS"):
                     raise ValueError(f"Expected 'ITEM: ATOMS', but got: {line.strip()}")
                 column_names = line.strip().split(' ')[2:]
 
-                # --- Consistency Checks for (N, A, C) Matrix ---
-                if initial_num_atoms == -1: # First frame setup
+                if initial_num_atoms == -1:
                     initial_num_atoms = num_atoms
                     initial_num_cols_per_atom = len(column_names)
                     dumped_column_names = column_names
-                    initial_box_data = current_box_array # Store the first box
-                else: # Subsequent frames: validate consistency
+                    initial_box_data = current_box_array 
+                else:
                     if num_atoms != initial_num_atoms:
                         raise ValueError(
                             f"Number of atoms changed from {initial_num_atoms} to {num_atoms} "
@@ -129,16 +124,14 @@ def parse_out(filepath: str) -> dict:
     # Handle empty files or parsing failures gracefully
     if not all_timesteps:
         return {
-            'box': np.array([]), # Empty box
-            'timesteps': np.array([]), # Empty timesteps array
-            'args': [], # Empty args list
-            'data': np.array([]).reshape(0,0,0), # Empty 3D data array
+            'box': np.array([]), 
+            'timesteps': np.array([]), 
+            'args': [], 
+            'data': np.array([]).reshape(0,0,0),
         }
 
-    # Stack all 2D atom data frames into a single 3D NumPy array
     data_matrix_NAC = np.array(all_atom_data_2d_frames, dtype=float)
     timesteps_array = np.array(all_timesteps, dtype=int)
-
     data = {
         'box': initial_box_data,
         'timesteps': timesteps_array,
@@ -147,16 +140,12 @@ def parse_out(filepath: str) -> dict:
     }
     return data
 
-
-
 if __name__ == "__main__":
     
     fn = sys.argv[1]
-    
     data = parse_out(fn)
-
-    print(data['data'].shape)
-    print(data['timesteps'])
-    print(data['box'].shape)
-    print(data['box'])
-
+    print('contained args:')
+    for arg in data['args']:
+        print(arg)
+    print(f'data shape: {data["data"].shape}')
+    print(f'box: {data["box"]}')
