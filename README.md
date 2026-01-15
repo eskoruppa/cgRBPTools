@@ -1,5 +1,5 @@
 # cgRBPtools
-Python toolset mapping, backmapping, and analyzing cgRBP 
+Python module for mapping, backmapping, and analyzing cgRBP 
 
 Clone repository
 ```console
@@ -10,6 +10,9 @@ git clone --recurse-submodules -j8 git@github.com:eskoruppa/cgRBPTools.git
 
 ## Default output 
 There are two standard dump formats for RBP atoms. To utilize parsers and conversion tools provided in this package these formats have to be observed.
+
+ACTUALLY THE ORDER DOES NOT MATTER. THE ONLY REQUIREMENT IS FOR THE RELEVANT FIELDS TO BE INCLUDED!
+
 
 Requires computation of quaternions:
 ```

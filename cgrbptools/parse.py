@@ -140,6 +140,9 @@ def parse_out(filepath: str) -> dict:
     }
     return data
 
+def arg2id(data,arg):
+    return data['args'].index(arg)
+
 if __name__ == "__main__":
     
     fn = sys.argv[1]
@@ -149,3 +152,5 @@ if __name__ == "__main__":
         print(arg)
     print(f'data shape: {data["data"].shape}')
     print(f'box: {data["box"]}')
+    
+    print(arg2id)
