@@ -211,203 +211,119 @@ def eval_energy(fn,savefn=None,dofs=1,ylabel=None):
 # Numerical constants
 # =========================
 
-# True zero-rotation cutoff (do NOT use for numerical stabilization)
-DEF_EULER_EPSILON = 1e-12
+import math
+from .SO3.so3.pyConDec.pycondec import cond_jit
 
-# Thresholds for detecting angles close to 0 and close to pi via val = 0.5*(tr(R)-1)
+DEF_EULER_EPSILON = 1e-12
 DEF_EULER_CLOSE_TO_ONE = 1.0 - 1e-10
 DEF_EULER_CLOSE_TO_MINUS_ONE = -1.0 + 1e-10
 
-# Series / stability thresholds (kept outside for clarity + reproducibility)
-DEF_EULER_SERIES_SMALL = 1e-4      # for sin(x)/x and (1-cos(x))/x^2
-DEF_THETA_SCALE_SMALL = 1e-6       # for theta/(2 sin theta) scaling in log map
-DEF_AXIS_NORM_EPS = 1e-15          # avoid division by ~0 when normalizing axis
-DEF_AXIS_COMP_EPS = 1e-15          # avoid division by ~0 in pi-axis extraction
+DEF_EULER_SERIES_SMALL = 1e-4
+DEF_THETA_SCALE_SMALL = 1e-6
+DEF_AXIS_NORM_EPS = 1e-15
+DEF_AXIS_COMP_EPS = 1e-15
 
 
-# =========================
-# so(3) → SO(3)
-# =========================
-
-# @cond_jit(nopython=True, cache=True)
+@cond_jit(nopython=True, cache=True)
 def euler2rotmat(Omega: np.ndarray) -> np.ndarray:
-    """
-    Euler-Rodrigues / exponential map from so(3) to SO(3).
-
-    Numerically stable for small ||Omega|| by using series expansions for
-    sin(x)/x and (1-cos(x))/x^2.
-    """
-    Om = np.linalg.norm(Omega)
-
-    # Identity for (near) zero rotation
+    Om = math.sqrt(Omega[0]*Omega[0] + Omega[1]*Omega[1] + Omega[2]*Omega[2])
     if Om < DEF_EULER_EPSILON:
         return np.eye(3, dtype=np.double)
 
-    # Stable evaluation of:
-    #   A = sin(Om)/Om
-    #   B = (1-cos(Om))/Om^2
     if Om < DEF_EULER_SERIES_SMALL:
         Om2 = Om * Om
         Om4 = Om2 * Om2
-        # sin(x)/x = 1 - x^2/6 + x^4/120
         A = 1.0 - Om2 / 6.0 + Om4 / 120.0
-        # (1-cos(x))/x^2 = 1/2 - x^2/24 + x^4/720
         B = 0.5 - Om2 / 24.0 + Om4 / 720.0
     else:
-        A = np.sin(Om) / Om
-        B = (1.0 - np.cos(Om)) / (Om * Om)
+        A = math.sin(Om) / Om
+        B = (1.0 - math.cos(Om)) / (Om * Om)
 
-    x = Omega[0]
-    y = Omega[1]
-    z = Omega[2]
+    x, y, z = Omega[0], Omega[1], Omega[2]
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
 
-    # Rodrigues formula: R = I + A*[w]_x + B*[w]_x^2 (expanded)
     R = np.empty((3, 3), dtype=np.double)
-
-    xx = x * x
-    yy = y * y
-    zz = z * z
-
-    xy = x * y
-    xz = x * z
-    yz = y * z
-
     R[0, 0] = 1.0 - B * (yy + zz)
     R[1, 1] = 1.0 - B * (xx + zz)
     R[2, 2] = 1.0 - B * (xx + yy)
 
     R[0, 1] = B * xy - A * z
     R[1, 0] = B * xy + A * z
-
     R[0, 2] = B * xz + A * y
     R[2, 0] = B * xz - A * y
-
     R[1, 2] = B * yz - A * x
     R[2, 1] = B * yz + A * x
-
     return R
 
 
-# =========================
-# SO(3) → so(3)
-# =========================
-
-# @cond_jit(nopython=True, cache=True)
+@cond_jit(nopython=True, cache=True)
 def rotmat2euler(R: np.ndarray) -> np.ndarray:
-    """
-    Inverse of Euler Rodriguez Formula (log map SO(3)->so(3)),
-    returning the rotation vector Omega (3,).
+    out = np.empty(3, dtype=np.double)
 
-    Robustness features (as in the earlier version):
-      - clamp trace-derived val into [-1, 1] to avoid arccos NaNs
-      - stable small-angle handling for th/(2 sin th)
-      - robust angle≈pi handling using "largest diagonal" axis extraction
-    """
-    tr = R[0, 0] + R[1, 1] + R[2, 2]
-    val = 0.5 * (tr - 1.0)
-
-    # Clamp to valid arccos domain
+    val = 0.5 * ((R[0, 0] + R[1, 1] + R[2, 2]) - 1.0)
     if val > 1.0:
         val = 1.0
     elif val < -1.0:
         val = -1.0
 
-    # angle ~ 0
     if val > DEF_EULER_CLOSE_TO_ONE:
-        return np.zeros(3, dtype=np.double)
+        out[0] = 0.0; out[1] = 0.0; out[2] = 0.0
+        return out
 
-    # angle ~ pi
     if val < DEF_EULER_CLOSE_TO_MINUS_ONE:
-        r00 = R[0, 0]
-        r11 = R[1, 1]
-        r22 = R[2, 2]
+        r00, r11, r22 = R[0, 0], R[1, 1], R[2, 2]
 
-        # Compute axis components with safeguards against tiny negative due to roundoff
+        # pick dominant diagonal; compute axis; deterministic fallback if denom tiny
         if (r00 >= r11) and (r00 >= r22):
-            t = 0.5 * (r00 + 1.0)
-            if t < 0.0:
-                t = 0.0
-            ax = np.sqrt(t)
+            t = 0.5 * (r00 + 1.0);  t = 0.0 if t < 0.0 else t
+            ax = math.sqrt(t)
             if ax < DEF_AXIS_COMP_EPS:
-                # fallback (rare): choose another axis deterministically
-                t1 = 0.5 * (r11 + 1.0)
-                if t1 < 0.0:
-                    t1 = 0.0
-                ay = np.sqrt(t1)
-                t2 = 0.5 * (r22 + 1.0)
-                if t2 < 0.0:
-                    t2 = 0.0
-                az = np.sqrt(t2)
-                if ay >= az:
-                    return np.array([0.0, np.pi, 0.0], dtype=np.double)
-                return np.array([0.0, 0.0, np.pi], dtype=np.double)
+                out[0] = 0.0; out[1] = math.pi; out[2] = 0.0
+                return out
             ay = R[0, 1] / (2.0 * ax)
             az = R[0, 2] / (2.0 * ax)
-
         elif r11 >= r22:
-            t = 0.5 * (r11 + 1.0)
-            if t < 0.0:
-                t = 0.0
-            ay = np.sqrt(t)
+            t = 0.5 * (r11 + 1.0);  t = 0.0 if t < 0.0 else t
+            ay = math.sqrt(t)
             if ay < DEF_AXIS_COMP_EPS:
-                t0 = 0.5 * (r00 + 1.0)
-                if t0 < 0.0:
-                    t0 = 0.0
-                ax = np.sqrt(t0)
-                t2 = 0.5 * (r22 + 1.0)
-                if t2 < 0.0:
-                    t2 = 0.0
-                az = np.sqrt(t2)
-                if ax >= az:
-                    return np.array([np.pi, 0.0, 0.0], dtype=np.double)
-                return np.array([0.0, 0.0, np.pi], dtype=np.double)
+                out[0] = math.pi; out[1] = 0.0; out[2] = 0.0
+                return out
             ax = R[0, 1] / (2.0 * ay)
             az = R[1, 2] / (2.0 * ay)
-
         else:
-            t = 0.5 * (r22 + 1.0)
-            if t < 0.0:
-                t = 0.0
-            az = np.sqrt(t)
+            t = 0.5 * (r22 + 1.0);  t = 0.0 if t < 0.0 else t
+            az = math.sqrt(t)
             if az < DEF_AXIS_COMP_EPS:
-                t0 = 0.5 * (r00 + 1.0)
-                if t0 < 0.0:
-                    t0 = 0.0
-                ax = np.sqrt(t0)
-                t1 = 0.5 * (r11 + 1.0)
-                if t1 < 0.0:
-                    t1 = 0.0
-                ay = np.sqrt(t1)
-                if ax >= ay:
-                    return np.array([np.pi, 0.0, 0.0], dtype=np.double)
-                return np.array([0.0, np.pi, 0.0], dtype=np.double)
+                out[0] = math.pi; out[1] = 0.0; out[2] = 0.0
+                return out
             ax = R[0, 2] / (2.0 * az)
             ay = R[1, 2] / (2.0 * az)
 
-        # Normalize axis, then scale by pi
-        nrm = np.sqrt(ax * ax + ay * ay + az * az)
+        nrm = math.sqrt(ax*ax + ay*ay + az*az)
         if nrm < DEF_AXIS_NORM_EPS:
-            return np.array([np.pi, 0.0, 0.0], dtype=np.double)
-        inv = np.pi / nrm
-        return np.array([ax * inv, ay * inv, az * inv], dtype=np.double)
+            out[0] = math.pi; out[1] = 0.0; out[2] = 0.0
+            return out
 
-    # general case
-    th = np.arccos(val)
+        s = math.pi / nrm
+        out[0] = ax * s; out[1] = ay * s; out[2] = az * s
+        return out
 
-    # vee(R - R^T)
+    th = math.acos(val)
     vx = R[2, 1] - R[1, 2]
     vy = R[0, 2] - R[2, 0]
     vz = R[1, 0] - R[0, 1]
 
-    # scale = th / (2 sin(th)) with stable small-angle approximation
-    # th/(2 sin th) ~ 0.5 + th^2/12 for th -> 0
     if th < DEF_THETA_SCALE_SMALL:
         th2 = th * th
         scale = 0.5 + th2 / 12.0
     else:
-        scale = 0.5 * th / np.sin(th)
+        scale = 0.5 * th / math.sin(th)
 
-    return np.array([scale * vx, scale * vy, scale * vz], dtype=np.double)
+    out[0] = scale * vx
+    out[1] = scale * vy
+    out[2] = scale * vz
+    return out
 
 
 
@@ -435,6 +351,18 @@ if __name__ == "__main__":
     taus = taus[:3,:3]
     print((taus-euler2rotmat(rotmat2euler(taus))).sum())
     
+    
+    tau = taus
+    
+    X1 = so3.rotmat2euler(tau)
+    X2 = rotmat2euler(tau)
+    
+    
+    tau1 = so3.euler2rotmat(X1)
+    tau2 = euler2rotmat(X2)
+    
+    print((X1-X2).sum())
+    print((tau1-tau2).sum())
     
     
     
