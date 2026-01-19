@@ -25,7 +25,7 @@ def parse_custom(filename: str) -> Dict:
                 representing the box dimensions from the **FIRST** timestep.
               - 'timesteps' (np.ndarray): A 1D NumPy array containing the timestep numbers (length N).
               - 'args' (list): A list of strings with the names of the dumped attributes
-                (e.g., ['id', 'x', 'y', 'z', 'q[0]', 'q[1]', 'q[2]', 'q[3]']).
+                (e.g., ['id', 'type', 'mol', 'x', 'y', 'z', 'ix', 'iy', 'iz']).
               - 'data' (np.ndarray): A 3D NumPy array of shape (N, A, C), where:
                 N = number of timesteps
                 A = number of atoms per timestep
