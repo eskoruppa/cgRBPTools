@@ -4,20 +4,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union, Any
 import numpy as np
 
-# import numpy as np
-# import scipy as sp
-# from scipy.sparse import spmatrix
-# import hashlib
-# from typing import Any, Callable, Dict, List, Tuple
-
-# from abc import ABC, abstractmethod
-# from dataclasses import dataclass, field
-# from typing import ClassVar
-# from functools import cached_property
-
 from ..SO3 import so3
 from .lmp_topol import CGRBPTopology
-
 
 
 LMP_RBP_DIMS = 6

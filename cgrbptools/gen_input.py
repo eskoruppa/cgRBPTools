@@ -11,30 +11,30 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 from functools import cached_property
 
-from .cgrbp_methods.lmp_topol import CGRBPTopology
-from .cgrbp_methods.lmp_config import CGRBPConfigBuilder, CGRBPConfig
-from .cgrbp_methods.lmp_unit_conversion import RescaleUnits
+from .gen_input.lmp_topol import CGRBPTopology
+from .gen_input.lmp_config import CGRBPConfigBuilder, CGRBPConfig
+from .gen_input.unit_conversion import RescaleUnits
 
-# # load models
-# from .PolyCG.polycg import cgnaplus_bps_params
-# from .PolyCG.polycg import GenStiffness
-# # load partial stiffness generation
-# from .PolyCG.polycg import partial_stiff
-# # load coarse graining methods
-# from .cg import coarse_grain
+# load models
+from .PolyCG.polycg import cgnaplus_bps_params
+from .PolyCG.polycg import GenStiffness
+# load partial stiffness generation
+from .PolyCG.polycg import partial_stiff
+# load coarse graining methods
+from .PolyCG.polycg import coarse_grain
 # load sequence from sequence file
 from .PolyCG.polycg import load_sequence
-# # write sequence file
-# from .utils.seq import write_seqfile
+# write sequence file
+from .PolyCG.polycg import write_seqfile
 # load so3 
 from .SO3 import so3
 # load visualization methods
 from .PolyCG.polycg import cgvisual
 
-from .gen_params import gen_params
+from .PolyCG.polycg import gen_params
 
 
-def gen_database_file(
+def write_database(
     filename: str,
     topology: CGRBPTopology,
     add_extension: bool = True,

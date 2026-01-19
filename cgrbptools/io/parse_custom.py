@@ -5,7 +5,7 @@ import sys
 import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
-from .SO3 import so3
+from ..SO3 import so3
 
 
 def parse_custom(filename: str) -> Dict:
