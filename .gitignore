@@ -6,6 +6,8 @@
 # ignore test files and folders
 **test*/
 **test.*
+**Test*/
+**TEST*/
 
 # ignore data directories
 **Data/
