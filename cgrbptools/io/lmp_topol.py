@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import sys
 import numpy as np
 import scipy as sp
 from scipy.sparse import spmatrix
 import hashlib
 import numbers
-from typing import Any, Callable, Dict, List, Tuple, Iterable
+from collections.abc import Iterable
 from pathlib import Path
 
 from collections.abc import Sequence
@@ -20,6 +21,22 @@ CGRBP_DEFAULT_BOND_STYLE = 'rbp'
 CGRBP_DEFAULT_ANGLE_STYLE = 'rbp'
 CGRBP_DEFAULT_DEHIDRAL_STYLE = 'rbp'
 CGRBP_FENE_BOND_STYLE = 'rbpfene'
+
+LMP_TOPOL_ID_NUM_BP = 'number of rigid bodies'  
+LMP_TOPOL_ID_NUM_BONDS = 'number of bonds'
+LMP_TOPOL_ID_NUM_ANGLES = 'number of angles'
+LMP_TOPOL_ID_NUM_DIHEDRALS = 'number of dihedrals'
+LMP_TOPOL_ID_NUM_BOND_TYPES = 'number of bond types'
+LMP_TOPOL_ID_NUM_ANGLE_TYPES = 'number of angle types'
+LMP_TOPOL_ID_NUM_DIHEDRAL_TYPES = 'number of dihedral types'          
+LMP_TOPOL_ID_COUP_RANGE = 'coupling range'
+LMP_TOPOL_ID_BOND_STYLE = 'bond style'
+LMP_TOPOL_ID_ANGLE_STYLE = 'angle style'
+LMP_TOPOL_ID_DIHEDRAL_STYLE = 'dihedral style'
+LMP_TOPOL_ID_SEQS_SET = 'seqs set'
+LMP_TOPOL_ID_SEQS_CENTERED = 'seqs centered'
+LMP_TOPOL_ID_CHARS_PER_ATOM = 'chars per atom'
+LMP_TOPOL_ID_CLOSED = 'closed'   
 
 ##################################################################################################################
 ##################################################################################################################
@@ -308,14 +325,55 @@ class RBPBondCoeffs(RBPCoeffsBase):
     instances: list["RBPBondCoeffs"] = []
     registry: dict[tuple, "RBPBondCoeffs"] = {}
 
-    def _compute_hash(self) -> int:
-        return hash_bondcoeffs_128(self.X0_1, self.stiff, decimals=self.decimals, extra=self.extra)
-
     @property
     def X0(self):
         return self.X0_1
+    
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global registry, instances, and type count."""
+        cls.type_count = 0
+        cls.instances = []
+        cls.registry = {}
 
-    def to_str(self, hybrid:bool=False):
+    def _compute_hash(self) -> int:
+        return hash_bondcoeffs_128(self.X0_1, self.stiff, decimals=self.decimals, extra=self.extra)
+
+    @classmethod
+    def from_string(cls, line: str, bond_style: str | None = None, decimals: int | None = None) -> "RBPBondCoeffs":
+        """ Convert a database bond coeffs line to an RBPBondCoeffs instance."""
+        tokens = line.split()
+        idx = 1  # Skip type_id at position 0
+        
+        # Extract style from string if not provided
+        if bond_style is None:
+            bond_style = tokens[idx]
+            idx += 1
+        
+        # Extract extra coefficients if FENE style
+        extra = None
+        if bond_style == CGRBP_FENE_BOND_STYLE:
+            extra = np.array([float(tokens[idx]), float(tokens[idx+1]), float(tokens[idx+2])], dtype=np.float64)
+            idx += 3
+        
+        # Extract groundstate vector (6 values)
+        X0 = np.array([float(tokens[idx + i]) for i in range(LMP_RBP_DIMS)], dtype=np.float64)
+        idx += LMP_RBP_DIMS
+        
+        # Extract upper triangular stiffness matrix (21 values) and reconstruct symmetric matrix
+        stiff = np.zeros((LMP_RBP_DIMS, LMP_RBP_DIMS), dtype=np.float64)
+        for i in range(LMP_RBP_DIMS):
+            for j in range(i, LMP_RBP_DIMS):
+                value = float(tokens[idx])
+                stiff[i, j] = value
+                if i != j:
+                    stiff[j, i] = value  # Mirror to lower triangular
+                idx += 1
+        
+        # Create instance directly (not through create()) to preserve file order
+        return cls(X0, stiff, decimals, additional_coeffs=extra)
+
+    def to_string(self, hybrid:bool=False):
         dstr = f'{self.type_id}'
         if hybrid:
             dstr += f' rbp'
@@ -336,10 +394,53 @@ class RBPAngleCoeffs(RBPCoeffsBase):
     instances: list["RBPAngleCoeffs"] = []
     registry: dict[tuple, "RBPAngleCoeffs"] = {}
 
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global registry, instances, and type count."""
+        cls.type_count = 0
+        cls.instances = []
+        cls.registry = {}
+
     def _compute_hash(self) -> int:
         return hash_anglecoeffs_128(self.X0_1, self.X0_2, self.stiff, decimals=self.decimals, extra=self.extra)
 
-    def to_str(self, hybrid:bool=False):
+    @classmethod
+    def from_string(cls, line: str, angle_style: str | None = None, decimals: int | None = None) -> "RBPAngleCoeffs":
+        """ Convert a database angle coeffs line to an RBPAngleCoeffs instance."""
+        tokens = line.split()
+        idx = 1  # Skip type_id at position 0
+        
+        # Extract style from string if not provided
+        if angle_style is None:
+            angle_style = tokens[idx]
+            idx += 1
+        
+        # Extract extra coefficients if non-default style (currently angles have no extra coeffs)
+        extra = None
+        # Future: check for non-default angle styles that might have extra coefficients
+        # if angle_style != CGRBP_DEFAULT_ANGLE_STYLE:
+        #     extra = np.array([float(tokens[idx]), ...], dtype=np.float64)
+        #     idx += num_extra
+        
+        # Extract first groundstate vector (6 values)
+        X0_1 = np.array([float(tokens[idx + i]) for i in range(LMP_RBP_DIMS)], dtype=np.float64)
+        idx += LMP_RBP_DIMS
+        
+        # Extract second groundstate vector (6 values)
+        X0_2 = np.array([float(tokens[idx + i]) for i in range(LMP_RBP_DIMS)], dtype=np.float64)
+        idx += LMP_RBP_DIMS
+        
+        # Extract full stiffness matrix (36 values for 6x6 matrix)
+        stiff = np.zeros((LMP_RBP_DIMS, LMP_RBP_DIMS), dtype=np.float64)
+        for i in range(LMP_RBP_DIMS):
+            for j in range(LMP_RBP_DIMS):
+                stiff[i, j] = float(tokens[idx])
+                idx += 1
+        
+        # Create instance directly (not through create()) to preserve file order
+        return cls(X0_1, stiff, decimals, gs2=X0_2, additional_coeffs=extra)
+
+    def to_string(self, hybrid:bool=False):
         dstr = f'{self.type_id}'
         if hybrid:
             dstr += f' rbp'
@@ -362,10 +463,53 @@ class RBPDihedralCoeffs(RBPCoeffsBase):
     instances: list["RBPDihedralCoeffs"] = []
     registry: dict[tuple, "RBPDihedralCoeffs"] = {}
 
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global registry, instances, and type count."""
+        cls.type_count = 0
+        cls.instances = []
+        cls.registry = {}
+
     def _compute_hash(self) -> int:
         return hash_dihedralcoeffs_128(self.X0_1, self.X0_2, self.stiff, decimals=self.decimals, extra=self.extra)
 
-    def to_str(self, hybrid:bool=False):
+    @classmethod
+    def from_string(cls, line: str, dihedral_style: str | None = None, decimals: int | None = None) -> "RBPDihedralCoeffs":
+        """ Convert a database dihedral coeffs line to an RBPDihedralCoeffs instance."""
+        tokens = line.split()
+        idx = 1  # Skip type_id at position 0
+        
+        # Extract style from string if not provided
+        if dihedral_style is None:
+            dihedral_style = tokens[idx]
+            idx += 1
+        
+        # Extract extra coefficients if non-default style (currently dihedrals have no extra coeffs)
+        extra = None
+        # Future: check for non-default dihedral styles that might have extra coefficients
+        # if dihedral_style != CGRBP_DEFAULT_DEHIDRAL_STYLE:
+        #     extra = np.array([float(tokens[idx]), ...], dtype=np.float64)
+        #     idx += num_extra
+        
+        # Extract first groundstate vector (6 values)
+        X0_1 = np.array([float(tokens[idx + i]) for i in range(LMP_RBP_DIMS)], dtype=np.float64)
+        idx += LMP_RBP_DIMS
+        
+        # Extract second groundstate vector (6 values)
+        X0_2 = np.array([float(tokens[idx + i]) for i in range(LMP_RBP_DIMS)], dtype=np.float64)
+        idx += LMP_RBP_DIMS
+        
+        # Extract full stiffness matrix (36 values for 6x6 matrix)
+        stiff = np.zeros((LMP_RBP_DIMS, LMP_RBP_DIMS), dtype=np.float64)
+        for i in range(LMP_RBP_DIMS):
+            for j in range(LMP_RBP_DIMS):
+                stiff[i, j] = float(tokens[idx])
+                idx += 1
+        
+        # Create instance directly (not through create()) to preserve file order
+        return cls(X0_1, stiff, decimals, gs2=X0_2, additional_coeffs=extra)
+
+    def to_string(self, hybrid:bool=False):
         dstr = f'{self.type_id}'
         if hybrid:
             dstr += f' rbp'
@@ -403,6 +547,12 @@ class RBPBond:
         cls.count = len(cls.instances)
         self.index = cls.count
 
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global instances and count."""
+        cls.count = 0
+        cls.instances = []
+
     def delete(self):
         cls = type(self)
         if self in cls.instances:
@@ -410,9 +560,20 @@ class RBPBond:
             for i, inst in enumerate(cls.instances, start=1):
                 inst.index = i
             cls.count = len(cls.instances)
+    
+    @classmethod
+    def from_string(cls, line: str, bondcoeffs_list: list[RBPBondCoeffs]) -> "RBPBond":
+        """Parse a bond connectivity line and create an RBPBond instance."""
+        tokens = line.split()
+        # Format: index type_id id1 id2
+        bond_type_id = int(tokens[1])
+        id1 = int(tokens[2])
+        id2 = int(tokens[3])
+        bondcoeffs = bondcoeffs_list[bond_type_id - 1]  # type_id is 1-indexed
+        return cls(id1, id2, bondcoeffs)
             
-    def to_str(self):
-        return f'{self.index} {self.bondcoeffs.type_id} {self.id1} {self.id2}'
+    def to_string(self, atom_shift: int = 0, bond_shift: int = 0, bond_type_shift: int = 0):
+        return f'{self.index + bond_shift} {self.bondcoeffs.type_id + bond_type_shift} {self.id1 + atom_shift} {self.id2 + atom_shift}'
 
 @dataclass
 class RBPAngle:
@@ -431,6 +592,12 @@ class RBPAngle:
         cls.count = len(cls.instances)
         self.index = cls.count
 
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global instances and count."""
+        cls.count = 0
+        cls.instances = []
+
     def delete(self):
         cls = type(self)
         if self in cls.instances:
@@ -438,9 +605,21 @@ class RBPAngle:
             for i, inst in enumerate(cls.instances, start=1):
                 inst.index = i
             cls.count = len(cls.instances)
+    
+    @classmethod
+    def from_string(cls, line: str, anglecoeffs_list: list[RBPAngleCoeffs]) -> "RBPAngle":
+        """Parse an angle connectivity line and create an RBPAngle instance."""
+        tokens = line.split()
+        # Format: index type_id id1 id2 id3
+        angle_type_id = int(tokens[1])
+        id1 = int(tokens[2])
+        id2 = int(tokens[3])
+        id3 = int(tokens[4])
+        anglecoeffs = anglecoeffs_list[angle_type_id - 1]  # type_id is 1-indexed
+        return cls(id1, id2, id3, anglecoeffs)
             
-    def to_str(self):
-        return f'{self.index} {self.anglecoeffs.type_id} {self.id1} {self.id2} {self.id3}'
+    def to_string(self, atom_shift: int = 0, angle_shift: int = 0, angle_type_shift: int = 0):
+        return f'{self.index + angle_shift} {self.anglecoeffs.type_id + angle_type_shift} {self.id1 + atom_shift} {self.id2 + atom_shift} {self.id3 + atom_shift}'
 
 
 @dataclass
@@ -461,6 +640,12 @@ class RBPDihedral:
         cls.count = len(cls.instances)
         self.index = cls.count
 
+    @classmethod
+    def reset_registry(cls):
+        """Reset the global instances and count."""
+        cls.count = 0
+        cls.instances = []
+
     def delete(self):
         cls = type(self)
         if self in cls.instances:
@@ -468,9 +653,22 @@ class RBPDihedral:
             for i, inst in enumerate(cls.instances, start=1):
                 inst.index = i
             cls.count = len(cls.instances)
+    
+    @classmethod
+    def from_string(cls, line: str, dihedralcoeffs_list: list[RBPDihedralCoeffs]) -> "RBPDihedral":
+        """Parse a dihedral connectivity line and create an RBPDihedral instance."""
+        tokens = line.split()
+        # Format: index type_id id1 id2 id3 id4
+        dihedral_type_id = int(tokens[1])
+        id1 = int(tokens[2])
+        id2 = int(tokens[3])
+        id3 = int(tokens[4])
+        id4 = int(tokens[5])
+        dihedralcoeffs = dihedralcoeffs_list[dihedral_type_id - 1]  # type_id is 1-indexed
+        return cls(id1, id2, id3, id4, dihedralcoeffs)
 
-    def to_str(self):
-        return f'{self.index} {self.dihedralcoeffs.type_id} {self.id1} {self.id2} {self.id3} {self.id4}'
+    def to_string(self, atom_shift: int = 0, dihedral_shift: int = 0, dihedral_type_shift: int = 0):
+        return f'{self.index + dihedral_shift} {self.dihedralcoeffs.type_id + dihedral_type_shift} {self.id1 + atom_shift} {self.id2 + atom_shift} {self.id3 + atom_shift} {self.id4 + atom_shift}'
 
 
 ##################################################################################################################
@@ -479,13 +677,135 @@ class RBPDihedral:
 
 
 class CGRBPTopology:
+    """Coarse-grained rigid base-pair (CGRBP) DNA topology representation for LAMMPS simulations.
+    
+    This class manages the complete molecular topology of coarse-grained rigid base pair models(RBP). 
+    It handles the construction, storage, and serialization of bond, angle, and dihedral interactions 
+    between base pairs, along with their coefficient definitions and optional sequence information.
+    
+    The topology is built from groundstate configurations and stiffness matrices that
+    encode the mechanical properties of DNA. The class automatically generates bond
+    interactions between adjacent base pairs and angle/dihedral interactions for
+    longer-range couplings based on a specified coupling range.
+    
+    Key Features
+    ------------
+    - Automatic topology generation from groundstate vectors and stiffness matrices
+    - Support for both open and closed (circular) chain topologies
+    - Coefficient deduplication to minimize LAMMPS type definitions
+    - Optional FENE (Finite Extensible Nonlinear Elastic) bond potentials
+    - Per-atom sequence string storage for DNA sequence tracking
+    - Database serialization for saving and loading complete topologies
+    - LAMMPS-compatible output formatting with configurable index shifts
+    
+    Topology Structure
+    ------------------
+    The topology consists of three levels of interactions:
+    
+    1. **Bonds**: Connect adjacent base pairs (coupling range 0)
+       - Store groundstate configuration and local stiffness block
+       - Optional FENE coefficients for nonlinear elasticity
+       
+    2. **Angles**: Connect base pair triads (coupling range 1)
+       - Encode nearest-neighbor coupling effects
+       - Store two groundstate vectors and off-diagonal stiffness block
+       
+    3. **Dihedrals**: Connect base pair quartets (coupling range ≥ 2)
+       - Encode longer-range coupling effects
+       - Same structure as angles but for non-adjacent pairs
+    
+    Each interaction type has associated coefficient objects that store the mechanical
+    parameters. Identical coefficients are automatically deduplicated to minimize the
+    number of LAMMPS types.
+    
+    Workflow
+    --------
+    1. Initialize a CGRBPTopology instance with desired parameters
+    2. Set mechanical parameters using set_params() with groundstate and stiffness matrix
+    3. Optionally add sequence information using set_sequence() or set_atom_seqs()
+    4. Optionally enable FENE bonds using set_fene()
+    5. Export to LAMMPS format or save to database file
+    
+    Attributes
+    ----------
+    nbp : int
+        Number of base pairs (atoms) in the topology.
+    nbps : int
+        Number of junctions (base pair steps) in the topology.
+    coupling_range : int
+        Maximum coupling range for angle/dihedral interactions.
+    decimals : int or None
+        Number of decimal places for coefficient rounding.
+    closed : bool
+        Whether the topology represents a closed (circular) chain.
+    bond_style, angle_style, dihedral_style : str
+        LAMMPS interaction styles for each interaction type.
+    bonds, angles, dihedrals : list
+        Lists of RBPBond, RBPAngle, RBPDihedral instances.
+    bondtypes, angletypes, dihedraltypes : list
+        Lists of unique coefficient objects (RBPBondCoeffs, etc.).
+    groundstate : ndarray
+        Groundstate configuration vectors for each junction.
+    stiffmat : ndarray or sparse matrix
+        Stiffness matrix encoding mechanical coupling.
+    couplings_set : bool
+        Whether interactions have been initialized.
+    seqs_set : bool
+        Whether sequence information has been assigned.
+    atom_seqs : list of str, optional
+        Per-atom sequence strings if assigned.
+    
+    See Also
+    --------
+    RBPBondCoeffs, RBPAngleCoeffs, RBPDihedralCoeffs : Coefficient classes
+    RBPBond, RBPAngle, RBPDihedral : Interaction classes
+    
+    Examples
+    --------
+    Create a simple open chain topology:
+    
+    >>> import numpy as np
+    >>> from scipy.sparse import csr_matrix
+    >>> 
+    >>> # Define groundstate and stiffness for 10 base pairs (9 junctions)
+    >>> groundstate = np.zeros((9, 6))  # 9 junctions, 6 DOF each
+    >>> stiffmat = csr_matrix((54, 54))  # 9*6 x 9*6 stiffness matrix
+    >>> 
+    >>> # Create topology
+    >>> topology = CGRBPTopology(coupling_range=2, decimals=6, closed=False)
+    >>> topology.set_params(groundstate, stiffmat)
+    >>> 
+    >>> # Add sequence information
+    >>> topology.set_sequence('ATCGATCGAT', chars_per_atom=1)
+    >>> 
+    >>> # Save to database
+    >>> topology.write_database('output.db')
+    
+    Load a topology from a database file:
+    
+    >>> topology = CGRBPTopology.read_database('output.db', decimals=6)
+    >>> print(f"Loaded topology with {topology.nbp} base pairs")
+    
+    Enable FENE bonds for enhanced stability:
+    
+    >>> topology.set_fene(k=30.0, Rc=1.5, R0=2.0)
+    
+    Notes
+    -----
+    - The class uses global registries for coefficient deduplication. Use reset_registry()
+      class methods on coefficient classes when creating multiple independent topologies.
+    - Closed topologies require nbp == nbps (same number of atoms and junctions).
+    - The stiffness matrix should be symmetric and positive semi-definite.
+    - Coefficient rounding via the decimals parameter helps numerical stability and
+      deduplication but may introduce small errors in mechanical properties.
+    """
     
     def __init__(
         self,
         coupling_range: int = 2,
         decimals: int | None = None,
         *,
-        check_existing_types: bool = False,
+        check_existing_types: bool = True,
         closed: bool = False,
     ):
         """
@@ -521,6 +841,8 @@ class CGRBPTopology:
         if not isinstance(closed, bool):
             raise TypeError("closed must be a bool.")
         self._closed = closed
+        self.couplings_set = False
+        self.seqs_set = False
         
         self.set_coupling_range(coupling_range)
         
@@ -538,16 +860,105 @@ class CGRBPTopology:
         self.extra_angle = None
         self.extra_dihedral = None
         
-        self.couplings_set = False
-        self.seqs_set = False
         
-    
     @property
     def closed(self) -> bool:
         """Whether the topology uses closed boundary conditions."""
         return self._closed
+    
+    @property
+    def num_atoms(self) -> int:
+        """Number of atoms in the topology."""
+        if not hasattr(self, 'nbp') or self.nbp is None:
+            return 0
+        return self.nbp
+    
+    @property
+    def num_bonds(self) -> int:
+        """Number of bonds in this topology."""
+        if not hasattr(self, 'bonds') or self.bonds is None:
+            return 0
+        return len(self.bonds)
+    
+    @property
+    def num_angles(self) -> int:
+        """Number of angles in this topology."""
+        if not hasattr(self, 'angles') or self.angles is None:
+            return 0
+        return len(self.angles)
+    
+    @property
+    def num_dihedrals(self) -> int:
+        """Number of dihedrals in this topology."""
+        if not hasattr(self, 'dihedrals') or self.dihedrals is None:
+            return 0
+        return len(self.dihedrals)
+    
+    @property
+    def num_bond_types(self) -> int:
+        """Number of unique bond types in this topology."""
+        if not hasattr(self, 'bondtypes') or self.bondtypes is None:
+            return 0
+        return len(self.bondtypes)
+    
+    @property
+    def num_angle_types(self) -> int:
+        """Number of unique angle types in this topology."""
+        if not hasattr(self, 'angletypes') or self.angletypes is None:
+            return 0
+        return len(self.angletypes)
+    
+    @property
+    def num_dihedral_types(self) -> int:
+        """Number of unique dihedral types in this topology."""
+        if not hasattr(self, 'dihedraltypes') or self.dihedraltypes is None:
+            return 0
+        return len(self.dihedraltypes)
+    
+    @property
+    def num_bonds_string(self) -> str:
+        """String representation of the number of bonds."""
+        return f"{self.num_bonds} bonds"
 
-
+    @property
+    def num_angles_string(self) -> str:
+        """String representation of the number of angles."""
+        return f"{self.num_angles} angles"
+    
+    @property
+    def num_dihedrals_string(self) -> str:
+        """String representation of the number of dihedrals."""
+        return f"{self.num_dihedrals} dihedrals"    
+    
+    @property
+    def num_bond_types_string(self) -> str:
+        """String representation of the number of bond types."""
+        return f"{self.num_bond_types} bond types"
+    
+    @property
+    def num_angle_types_string(self) -> str:
+        """String representation of the number of angle types."""
+        return f"{self.num_angle_types} angle types"    
+    
+    @property
+    def num_dihedral_types_string(self) -> str:
+        """String representation of the number of dihedral types."""
+        return f"{self.num_dihedral_types} dihedral types"
+    
+    @property
+    def has_fene(self) -> bool:
+        """Whether FENE bond interaction is active."""
+        return self.bond_style == CGRBP_FENE_BOND_STYLE
+    
+    @property
+    def sequence(self) -> str | None:
+        """Get the global sequence string if set."""
+        if not self.seqs_set:
+            return None
+        if hasattr(self, 'atom_seqs') and self.atom_seqs is not None:
+            return ''.join(self.atom_seqs)
+        return None
+    
     @closed.setter
     def closed(self, value: bool) -> None:
         self.set_closed(value)
@@ -577,8 +988,8 @@ class CGRBPTopology:
         if hasattr(self, "nbps") and self.nbps is not None:
             self.nbp = self.nbps if closed else self.nbps + 1
 
-        if getattr(self, "couplings_set", False):
-            self.init_couplings()
+        if self.couplings_set:
+            self._init_couplings()
     
     
     def set_coupling_range(self, coupling_range: int | None) -> None:
@@ -597,12 +1008,15 @@ class CGRBPTopology:
 
         if coupling_range < 0:
             raise ValueError("coupling_range must be >= 0.")
+        
+        if hasattr(self, "coupling_range") and coupling_range == self.coupling_range:
+            return
 
         self.coupling_range = coupling_range
 
         # Rebuild couplings if they already exist
-        if getattr(self, "couplings_set", False):
-            self.init_couplings()
+        if self.couplings_set:
+            self._init_couplings()
     
         
     def set_fene(
@@ -628,6 +1042,10 @@ class CGRBPTopology:
             Maximum allowed bond extension.
         """
         
+        if hasattr(self, "fene_k") and hasattr(self, "fene_Rc") and hasattr(self, "fene_R0") \
+            and self.fene_k == k and self.fene_Rc == Rc and self.fene_R0 == R0:
+                return
+        
         self.fene_k = k
         self.fene_Rc = Rc
         self.fene_R0 = R0
@@ -639,11 +1057,29 @@ class CGRBPTopology:
         
         self.bond_style = CGRBP_FENE_BOND_STYLE
         self.fene_coeffs = [self.fene_k,self.fene_Rc,self.fene_R0]
-        self.extra_bond = number2str(self.fene_coeffs)
-        
+        self.extra_bond = np.array(self.fene_coeffs,dtype=np.float64)
+
         # Rebuild couplings if they already exist
-        if getattr(self, "couplings_set", False):
-            self.init_couplings()
+        if self.couplings_set:
+            self._init_couplings()
+    
+    
+    def remove_fene(self) -> None:
+        """
+        Remove the FENE bond interaction and restore the default bond style.
+        """
+        if self.extra_bond is None:
+            return
+        
+        self.fene_k = None
+        self.fene_Rc = None
+        self.fene_R0 = None
+        self.bond_style = CGRBP_DEFAULT_BOND_STYLE
+        self.fene_coeffs = None
+        self.extra_bond = None
+        # Rebuild couplings if they already exist
+        if self.couplings_set:
+            self._init_couplings()
         
         
     def set_params( self,
@@ -695,13 +1131,41 @@ class CGRBPTopology:
             self.extra_angle = extra_angle
         if extra_dihedral is not None:
             self.extra_dihedral = extra_dihedral 
-        self.init_couplings()
+        self._init_couplings()
         
     
-    def init_couplings(self) -> None:
+    def _init_couplings(self) -> None:
         """
-            initialize bonds, angles and dihedrals from provided groundstate and stiffness matrix
+        Initialize bonds, angles, and dihedrals from groundstate and stiffness matrix.
+        
+        This private method constructs the complete topology by:
+        1. Resetting all global registries to ensure clean state
+        2. Creating bond interactions between adjacent atoms
+        3. Creating angle interactions for nearest-neighbor couplings
+        4. Creating dihedral interactions for longer-range couplings up to coupling_range
+        5. Extracting unique coefficient types and storing copies in the topology
+        
+        The method handles both open and closed chain topologies, adjusting the
+        connectivity pattern and atom indexing accordingly.
+        
+        This method should only be called internally by set_params(), set_closed(),
+        set_coupling_range(), set_fene(), and remove_fene(). Users should not call
+        this directly; use the public setter methods instead.
+        
+        Raises
+        ------
+        ValueError
+            If closed topology has mismatched nbp and nbps values.
         """
+        print('Initializing couplings...')
+        
+        # Reset all global registries to ensure clean state for this topology
+        RBPBondCoeffs.reset_registry()
+        RBPAngleCoeffs.reset_registry()
+        RBPDihedralCoeffs.reset_registry()
+        RBPBond.reset_registry()
+        RBPAngle.reset_registry()
+        RBPDihedral.reset_registry()
         
         # guardrail: this should never trigger!
         if self._closed and self.nbp != self.nbps:
@@ -792,17 +1256,18 @@ class CGRBPTopology:
                     Mk = _get_block(ii,jj)
                     dihedrals.append(RBPDihedral(id1+1,id2+1,id3+1,id4+1,RBPDihedralCoeffs.create(X0,Mk,gs2=X0_2,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_dihedral)))    
         
+        # Store copies of instance lists, not references to global registries
         bondtypes = []
         if len(bonds) > 0:
-            bondtypes = bonds[0].bondcoeffs.instances
+            bondtypes = list(bonds[0].bondcoeffs.instances)
         
         angletypes = []    
         if len(angles) > 0:
-            angletypes = angles[0].anglecoeffs.instances
+            angletypes = list(angles[0].anglecoeffs.instances)
          
         dihedraltypes = []       
         if len(dihedrals) > 0:
-            dihedraltypes = dihedrals[0].dihedralcoeffs.instances
+            dihedraltypes = list(dihedrals[0].dihedralcoeffs.instances)
         
         self.bonds = bonds
         self.angles = angles
@@ -831,7 +1296,8 @@ class CGRBPTopology:
         seqs : Sequence of str
             Sequence strings assigned to each atom.
         centered : bool, optional
-            Whether the sequences are considered centered. Default is False.
+            Whether the sequences are considered centered. Center positions is chars_per_atom // 2.
+            Default is False.
         """
         
         if not self.couplings_set:
@@ -839,6 +1305,8 @@ class CGRBPTopology:
 
         if isinstance(seqs, (str, bytes)) or not isinstance(seqs, Sequence):
             raise TypeError("seqs must be a sequence (e.g., list/tuple) of strings.")
+
+        seqs = [seq.strip() for seq in seqs]
 
         if len(seqs) == 0:
             raise ValueError("seqs must be non-empty.")
@@ -857,33 +1325,54 @@ class CGRBPTopology:
         for seq in seqs[:-1]:
             if len(seq) != self.chars_per_atom:
                 raise ValueError(f'The same number of chars needs to be provided for all atoms, except for the last atom.')
-            
+
+        if self.closed and len(seqs[-1]) != self.chars_per_atom:
+            raise ValueError(f'Closed topology requires the last atom to have the same number of chars as the rest of the chain')
+
         if len(seqs[-1]) > self.chars_per_atom:
             raise ValueError("The last atom sequence may be shorter, but not longer than the others.")
-            
+        
+        if centered:
+            center_pos = self.chars_per_atom // 2
+            if len(seqs[-1]) <= center_pos:
+                min_seq_len = (self.nbp-1) * self.chars_per_atom + center_pos + 1
+                raise ValueError(f'Sequence for atom {self.nbp} is too short to be centered. With {self.nbp} atoms the sequence has to contain at least {min_seq_len} characters ({len("".join(seqs))} character sequence provided).')
+
+            if self.closed:
+                err_msg = 'Centering is not supported for closed topologies. Consider shifting the sequence.'
+                if len(''.join(seqs)) <= 200:
+                    err_msg += f'\nCurrent sequence: {"".join(seqs)}'
+                    err_msg += f'\nShifted sequence: {"".join(seqs)[center_pos:] + "".join(seqs)[:center_pos]}'
+                raise ValueError(err_msg)
+
         self.seqs_centered = centered
         self.atom_seqs = list(seqs)
         self.seqs_set = True
         
     
-    def set_sequence(self, seq: str, cg: int, centered: bool = False) -> None:
+    def set_sequence(
+        self, 
+        seq: str, 
+        chars_per_atom: int, 
+        centered: bool = False,
+        ) -> None:
         """
         Assign a global sequence and decompose it into per-atom blocks.
 
-        The input sequence is split into consecutive blocks of size ``cg``.
-        All blocks have length ``cg`` except possibly the last one, which may
+        The input sequence is split into consecutive blocks of size ``chars_per_atom``.
+        All blocks have length ``chars_per_atom`` except possibly the last one, which may
         contain fewer characters if the sequence length is not an exact
-        multiple of ``cg``. The total number of blocks must match the number
+        multiple of ``chars_per_atom``. The total number of blocks must match the number
         of atoms inferred from the coupling definition.
 
         Parameters
         ----------
         seq : str
             Global sequence string to be decomposed.
-        cg : int
+        chars_per_atom : int
             Number of characters per atom (coarse-graining level).
         centered : bool, optional
-            Whether the resulting per-atom sequences are considered centered.
+            Whether the resulting per-atom sequences are considered centered. Center positions is chars_per_atom // 2.
             Default is False.
         """
         if not self.couplings_set:
@@ -892,120 +1381,399 @@ class CGRBPTopology:
         if not isinstance(seq, str):
             raise TypeError("seq must be a string.")
 
-        if not isinstance(cg, int) or cg <= 0:
-            raise ValueError("cg must be a positive integer.")
+        if not isinstance(chars_per_atom, int) or chars_per_atom <= 0:
+            raise ValueError("chars_per_atom must be a positive integer.")
 
-        n_blocks = (len(seq) + cg - 1) // cg
+        n_blocks = (len(seq) + chars_per_atom - 1) // chars_per_atom
         if n_blocks != self.nbp:
             raise ValueError(
                 f"Mismatch between sequence length and number of atoms: "
-                f"ceil(len(seq)/cg) = {n_blocks}, expected nbp = {self.nbp}."
+                f"ceil(len(seq)/chars_per_atom) = {n_blocks}, expected nbp = {self.nbp}."
             )
 
-        # Decompose sequence into blocks of size cg
-        seqs = [seq[i:i + cg] for i in range(0, len(seq), cg)]
+        # Decompose sequence into blocks of size chars_per_atom
+        seqs = [seq[i:i + chars_per_atom] for i in range(0, len(seq), chars_per_atom)]
         self.set_atom_seqs(seqs, centered=centered)
+    
+
+    def connectivity_string(
+        self,
+        atom_shift: int = 0,
+        bond_shift: int = 0,
+        bond_type_shift: int = 0,
+        angle_shift: int = 0,
+        angle_type_shift: int = 0,
+        dihedral_shift: int = 0,
+        dihedral_type_shift: int = 0,
+    ) -> str:
+        """
+        Format bonds, angles, and dihedrals sections as a string.
         
+        This method generates LAMMPS-compatible connectivity sections containing
+        bond, angle, and dihedral definitions. Each section lists interactions with
+        their indices, type IDs, and participating atom IDs.
+        
+        The shift parameters enable combining multiple topologies by offsetting
+        indices and type IDs to avoid conflicts. All shifts default to 0, producing
+        output with original indices.
+        
+        Parameters
+        ----------
+        atom_shift : int, optional
+            Offset added to all atom indices. Used when combining multiple molecules
+            to ensure unique atom numbering. Default is 0.
+        bond_shift : int, optional
+            Offset added to bond interaction indices. Default is 0.
+        bond_type_shift : int, optional
+            Offset added to bond type IDs. Default is 0.
+        angle_shift : int, optional
+            Offset added to angle interaction indices. Default is 0.
+        angle_type_shift : int, optional
+            Offset added to angle type IDs. Default is 0.
+        dihedral_shift : int, optional
+            Offset added to dihedral interaction indices. Default is 0.
+        dihedral_type_shift : int, optional
+            Offset added to dihedral type IDs. Default is 0.
+        
+        Returns
+        -------
+        str
+            Formatted connectivity sections containing Bonds, Angles, and Dihedrals
+            sections as appropriate. Empty string if no interactions exist.
+        """
+        lines = []
+        
+        if len(self.bonds) > 0:
+            lines.append('\nBonds\n\n')
+            for bond in self.bonds:
+                lines.append(f'{bond.to_string(atom_shift=atom_shift, bond_shift=bond_shift, bond_type_shift=bond_type_shift)}\n')
+            lines.append('\n')
+        
+        if len(self.angles) > 0:
+            lines.append('\nAngles\n\n')
+            for angle in self.angles:
+                lines.append(f'{angle.to_string(atom_shift=atom_shift, angle_shift=angle_shift, angle_type_shift=angle_type_shift)}\n')
+            lines.append('\n')
+        
+        if len(self.dihedrals) > 0:
+            lines.append('\nDihedrals\n\n')
+            for dihedral in self.dihedrals:
+                lines.append(f'{dihedral.to_string(atom_shift=atom_shift, dihedral_shift=dihedral_shift, dihedral_type_shift=dihedral_type_shift)}\n')
+            lines.append('\n')
+        
+        return ''.join(lines)
+    
+    def sequence_string(self) -> str:
+        """
+        Format the per-atom sequences section as a string.
+
+        This method generates a section containing the sequence strings
+        assigned to each atom in the topology.
+
+        Returns
+        -------
+        str
+            Formatted Seqs section listing each atom's sequence string.
+            Empty string if no sequences are set.
+        """
+        if not self.seqs_set:
+            return ''
+        
+        lines = []
+        lines.append('\nSeqs\n\n')
+        for i, atom_seq in enumerate(self.atom_seqs):
+            lines.append(f'{i+1} {atom_seq.upper()}\n')
+        
+        return ''.join(lines)
+     
+    def coeffs_string(self) -> str:
+        """
+        Format all coefficient sections as a single string.
+
+        This method generates a combined string containing the bond,
+        angle, and dihedral coefficient sections used in the topology.
+
+        Returns
+        -------
+        str
+            Formatted sections for Bond Coeffs, Angle Coeffs, and Dihedral Coeffs.
+            Empty string if no coefficient types exist.
+        """
+        lines = []
+        lines.append('\nBond Coeffs\n\n')
+        for bondtype in self.bondtypes:
+            lines.append(f'{bondtype.to_string(hybrid=False)}\n')
+        lines.append('\n')
+        lines.append('\nAngle Coeffs\n\n')
+        for angletype in self.angletypes:
+            lines.append(f'{angletype.to_string(hybrid=False)}\n')
+        lines.append('\n')
+        lines.append('\nDihedral Coeffs\n\n')
+        for dihedraltype in self.dihedraltypes:
+            lines.append(f'{dihedraltype.to_string(hybrid=False)}\n')
+        lines.append('\n')
+        return ''.join(lines)
+    
+    @classmethod
+    def read_database(
+        cls,
+        filename: Path| str,
+        decimals: int | None = None,
+        check_existing_types: bool = True,
+    ) -> "CGRBPTopology":
+        """Read a database file and reconstruct a CGRBPTopology instance.
+        
+        This classmethod reads a database file created by write_database() and
+        reconstructs the topology object with all metadata, coefficients, and
+        optionally connectivity information.
+        
+        Parameters
+        ----------
+        filename : str
+            Path to the database file to read.
+        decimals : int or None, optional
+            Number of decimals for coefficient rounding. If None, uses value
+            from file or no rounding.
+        check_existing_types : bool, optional
+            Whether to check for existing coefficient types when reconstructing.
+            Default is False.
+        
+        Returns
+        -------
+        CGRBPTopology
+            Reconstructed topology object.
+        """
+        with open(filename, 'r') as f:
+            content = f.read()
+        
+        lines = content.strip().split('\n')
+        
+        # Parse metadata
+        metadata = {}
+        i = 0
+        while i < len(lines) and lines[i].strip():
+            line = lines[i].strip()
+            if ':' in line:
+                key, value = line.split(':', 1)
+                metadata[key.strip()] = value.strip()
+            i += 1
+        
+        # Extract metadata values
+        nbp = int(metadata.get(LMP_TOPOL_ID_NUM_BP, 0))
+        coupling_range = int(metadata.get(LMP_TOPOL_ID_COUP_RANGE, 2))
+        bond_style = metadata.get(LMP_TOPOL_ID_BOND_STYLE, CGRBP_DEFAULT_BOND_STYLE)
+        angle_style = metadata.get(LMP_TOPOL_ID_ANGLE_STYLE, CGRBP_DEFAULT_ANGLE_STYLE)
+        dihedral_style = metadata.get(LMP_TOPOL_ID_DIHEDRAL_STYLE, CGRBP_DEFAULT_DEHIDRAL_STYLE)
+        seqs_set = bool(int(metadata.get(LMP_TOPOL_ID_SEQS_SET, 0)))
+        seqs_centered = bool(int(metadata.get(LMP_TOPOL_ID_SEQS_CENTERED, 0))) if seqs_set else False
+        chars_per_atom = int(metadata.get(LMP_TOPOL_ID_CHARS_PER_ATOM, 1)) if seqs_set else 1
+        closed = bool(int(metadata.get(LMP_TOPOL_ID_CLOSED, 0)))
+                
+        # Reset all registries before reading
+        RBPBondCoeffs.reset_registry()
+        RBPAngleCoeffs.reset_registry()
+        RBPDihedralCoeffs.reset_registry()
+        RBPBond.reset_registry()
+        RBPAngle.reset_registry()
+        RBPDihedral.reset_registry()
+        
+        # Parse sections
+        sections = {}
+        current_section = None
+        section_lines = []
+        
+        for line in lines[i:]:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            
+            # Check if this is a section header
+            if line_stripped in ['Seqs', 'Bonds', 'Angles', 'Dihedrals', 'Bond Coeffs', 'Angle Coeffs', 'Dihedral Coeffs']:
+                if current_section is not None:
+                    sections[current_section] = section_lines
+                current_section = line_stripped
+                section_lines = []
+            else:
+                section_lines.append(line_stripped)
+
+        # account for last section
+        if current_section is not None:
+            sections[current_section] = section_lines
+        
+        for key in sections:
+            print(key)
+        
+        # Parse coefficient sections
+        bondcoeffs_list = []
+        if 'Bond Coeffs' in sections:
+            for line in sections['Bond Coeffs']:
+                if line:
+                    bondcoeff = RBPBondCoeffs.from_string(line, bond_style, decimals)
+                    print(bondcoeff.to_string())
+
+                    bondcoeffs_list.append(bondcoeff)
+        
+        print('Parsed bond coeffs:', len(bondcoeffs_list))
+        
+        anglecoeffs_list = []
+        if 'Angle Coeffs' in sections:
+            for line in sections['Angle Coeffs']:
+                if line:
+                    anglecoeff = RBPAngleCoeffs.from_string(line, angle_style, decimals)
+                    anglecoeffs_list.append(anglecoeff)
+                    
+        print('Parsed angle coeffs:', len(anglecoeffs_list))
+        
+        dihedralcoeffs_list = []
+        if 'Dihedral Coeffs' in sections:
+            for line in sections['Dihedral Coeffs']:
+                if line:
+                    dihedralcoeff = RBPDihedralCoeffs.from_string(line, dihedral_style, decimals)
+                    dihedralcoeffs_list.append(dihedralcoeff)
+        
+        print('Parsed dihedral coeffs:', len(dihedralcoeffs_list))
+        
+        # Parse connectivity sections (if present)
+        bonds = []
+        if 'Bonds' in sections:
+            for line in sections['Bonds']:
+                if line:
+                    bond = RBPBond.from_string(line, bondcoeffs_list)
+                    bonds.append(bond)
+        
+        angles = []
+        if 'Angles' in sections:
+            for line in sections['Angles']:
+                if line:
+                    angle = RBPAngle.from_string(line, anglecoeffs_list)
+                    angles.append(angle)
+        
+        dihedrals = []
+        if 'Dihedrals' in sections:
+            for line in sections['Dihedrals']:
+                if line:
+                    dihedral = RBPDihedral.from_string(line, dihedralcoeffs_list)
+                    dihedrals.append(dihedral)
+        
+        # Parse sequences (if present)
+        atom_seqs = []
+        if 'Seqs' in sections:
+            for line in sections['Seqs']:
+                if line:
+                    parts = line.split(maxsplit=1)
+                    if len(parts) == 2:
+                        atom_seqs.append(parts[1])
+        
+        # Create topology instance
+        topology = cls(
+            coupling_range=coupling_range,
+            decimals=decimals,
+            check_existing_types=check_existing_types,
+            closed=closed,
+        )
+        
+        # Set internal state
+        topology.nbp = nbp
+        topology.nbps = nbp if closed else nbp - 1
+        topology.bond_style = bond_style
+        topology.angle_style = angle_style
+        topology.dihedral_style = dihedral_style
+        
+        # Set coefficients and interactions
+        topology.bondtypes = bondcoeffs_list
+        topology.angletypes = anglecoeffs_list
+        topology.dihedraltypes = dihedralcoeffs_list
+        topology.bonds = bonds
+        topology.angles = angles
+        topology.dihedrals = dihedrals
+        topology.couplings_set = True
+        
+        # Set sequences if present
+        if atom_seqs:
+            topology.atom_seqs = atom_seqs
+            topology.chars_per_atom = chars_per_atom
+            topology.seqs_centered = seqs_centered
+            topology.seqs_set = True
+        
+        return topology
+    
+
     
     def write_database(
         self,
-        filename: str,
+        filename: str | Path,
         add_extension: bool = True,
+        include_connectivity: bool = True,
         ) -> None:
+        """Write topology to a database file.
+        
+        This method serializes the complete topology including metadata, coefficient
+        definitions, and optionally connectivity information to a database file. The
+        file format is structured with labeled sections for easy parsing and can be
+        read back using the read_database() classmethod for round-trip serialization.
+        
+        The database file contains:
+        - Metadata section: nbp, coupling_range, styles, counts, sequence flags, closed
+        - Seqs section (optional): Per-atom sequence strings if sequences are set
+        - Connectivity sections (optional): Bonds, Angles, Dihedrals with atom indices
+        - Coefficient sections: Bond Coeffs, Angle Coeffs, Dihedral Coeffs
+        
+        Parameters
+        ----------
+        filename : str or Path
+            Path where the database file will be written. Can be absolute or relative.
+        add_extension : bool, optional
+            If True, automatically adds or replaces the file extension with '.db'.
+            If False, uses the filename exactly as provided. Default is True.
+        include_connectivity : bool, optional
+            If True, includes the connectivity sections (Bonds, Angles, Dihedrals) and
+            their counts in the metadata. If False, only writes coefficient definitions
+            and metadata. This is useful when only coefficient data is needed without
+            the full topology structure. Default is True.
+        
+        Returns
+        -------
+        None
+        
+        See Also
+        --------
+        read_database : Read a database file and reconstruct topology.
+        """
+
+        filename = Path(filename)
         
         if add_extension:
-            filename = str(Path(filename).with_suffix('.db'))
+            filename = filename.with_suffix('.db')
         
-        with open(filename,'w') as f:
-            
-            f.write(f'number of triads:         {self.nbp}\n')
-            f.write(f'number of bonds types:    {len(self.bondtypes)}\n')
-            f.write(f'number of angle types:    {len(self.angletypes)}\n')
-            f.write(f'number of dihedral types: {len(self.dihedraltypes)}\n')
-            f.write(f'bond style:               {self.bond_style}\n')
-            f.write(f'angle style:              {self.angle_style}\n')
-            f.write(f'dihedral style:           {self.dihedral_style}\n')
-            f.write(f'seqs set:                 {int(self.seqs_set)}\n')
-            if self.seqs_set:
-                f.write(f'seqs centered:            {int(self.seqs_centered)}\n')
-                f.write(f'chars per atom:           {int(self.chars_per_atom)}\n')
-            f.write(f'closed:                   {int(self.seqs_centered)}\n')
-            # f.write(f'scaling factor:           {SCALING FACTOR}\n')
+        lines = []
+        lines.append(f'{LMP_TOPOL_ID_NUM_BP}:   {self.nbp}\n')
+        lines.append(f'{LMP_TOPOL_ID_COUP_RANGE}:           {self.coupling_range}\n')
+        if include_connectivity:
+            lines.append(f'{LMP_TOPOL_ID_NUM_BONDS}:          {self.num_bonds}\n')
+            lines.append(f'{LMP_TOPOL_ID_NUM_ANGLES}:         {self.num_angles}\n')
+            lines.append(f'{LMP_TOPOL_ID_NUM_DIHEDRALS}:      {self.num_dihedrals}\n')
+        lines.append(f'{LMP_TOPOL_ID_NUM_BOND_TYPES}:     {self.num_bond_types}\n')
+        lines.append(f'{LMP_TOPOL_ID_NUM_ANGLE_TYPES}:    {self.num_angle_types}\n')
+        lines.append(f'{LMP_TOPOL_ID_NUM_DIHEDRAL_TYPES}: {self.num_dihedral_types}\n')
+        lines.append(f'{LMP_TOPOL_ID_BOND_STYLE}:               {self.bond_style}\n')
+        lines.append(f'{LMP_TOPOL_ID_ANGLE_STYLE}:              {self.angle_style}\n')
+        lines.append(f'{LMP_TOPOL_ID_DIHEDRAL_STYLE}:           {self.dihedral_style}\n')
+        lines.append(f'{LMP_TOPOL_ID_SEQS_SET}:                 {int(self.seqs_set)}\n')
+        if self.seqs_set:
+            lines.append(f'{LMP_TOPOL_ID_SEQS_CENTERED}:            {int(self.seqs_centered)}\n')
+            lines.append(f'{LMP_TOPOL_ID_CHARS_PER_ATOM}:           {int(self.chars_per_atom)}\n')
+        lines.append(f'{LMP_TOPOL_ID_CLOSED}:                   {int(self.closed)}\n\n')
+        # lines.append(f'scaling factor:           {SCALING FACTOR}\n')
 
-            if self.seqs_set:
-                f.write(f'\nSeqs\n\n')
-                for i,atom_seq in enumerate(self.atom_seqs):
-                    f.write(f'{i+1} {atom_seq.upper()}\n')
-            
-            if len(self.bondtypes) > 0:
-                f.write(f'\nBond Coeffs\n\n')
-                for bondtype in self.bondtypes:
-                    f.write(f'{bondtype.to_str(hybrid=False)}\n')
-                f.write('\n')
-
-            if len(self.angletypes) > 0:
-                f.write(f'\nAngle Coeffs\n\n')
-                for angletype in self.angletypes:
-                    f.write(f'{angletype.to_str(hybrid=False)}\n')
-                f.write('\n')
-
-            if len(self.dihedraltypes) > 0:
-                f.write(f'\nDihedral Coeffs\n\n')
-                for dihedraltype in self.dihedraltypes:
-                    f.write(f'{dihedraltype.to_str(hybrid=False)}\n')
-                f.write('\n')    
-    
-
-##################################################################################################################
-##################################################################################################################
-# Write Database file
-
-
-# DEPRICATED!
-def write_database(
-    filename: str,
-    topology: CGRBPTopology,
-    add_extension: bool = True,
-    seq: str | None = None,
-    composite_size: int = 1,
-    start_id: int | None = None,
-    end_id: int | None = None 
-    ) -> None:
-    
-    if add_extension:
-        filename = str(Path(filename).with_suffix('.db'))
-    
-    with open(filename,'w') as f:
+        if self.seqs_set:
+            lines.append(self.sequence_string())
         
-        f.write(f'{topology.nbps + 1} triads\n\n')
+        if include_connectivity:
+            lines.append('\n')
+            lines.append(self.connectivity_string())
         
-        if seq is not None:
-            if end_id is not None:
-                seq = seq[:end_id]
-            if start_id is not None:
-                seq = seq[start_id:]
-            
-            pseqs = [seq[ii*composite_size:(ii+1)*composite_size] for ii in range(topology.nbps+1)]
-            pseqs[-1] = pseqs[-1][:1]
-            
-            f.write(f'\nSeqs\n\n')
-            for i,pseq in enumerate(pseqs):
-                f.write(f'{i+1} {pseq.upper()}\n')
-        
-        if len(topology.bondtypes) > 0:
-            f.write(f'\nBond Coeffs\n\n')
-            for bondtype in topology.bondtypes:
-                f.write(f'{bondtype.to_str(hybrid=False)}\n')
-            f.write('\n')
+        lines.append(self.coeffs_string())
 
-        if len(topology.angletypes) > 0:
-            f.write(f'\nAngle Coeffs\n\n')
-            for angletype in topology.angletypes:
-                f.write(f'{angletype.to_str(hybrid=False)}\n')
-            f.write('\n')
-
-        if len(topology.dihedraltypes) > 0:
-            f.write(f'\nDihedral Coeffs\n\n')
-            for dihedraltype in topology.dihedraltypes:
-                f.write(f'{dihedraltype.to_str(hybrid=False)}\n')
-            f.write('\n')
+        with open(filename, 'w') as f:
+            f.write(''.join(lines))
+             
