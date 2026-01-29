@@ -171,30 +171,30 @@ The database file is the primary output containing all interaction parameters fo
 #### File Structure
 
 ```
-number of rigid bodies:     200
-coupling range:             1
-number of bonds:            199
-number of angles:           198
-number of dihedrals:        0
-number of bond types:       16
-number of angle types:      256
-number of dihedral types:   0
+number of rigid bodies:     21
+coupling range:             2
+number of bonds:            20
+number of angles:           19
+number of dihedrals:        18
+number of bond types:       20
+number of angle types:      19
+number of dihedral types:   18
 bond style:                 rbp
 angle style:                rbp
 dihedral style:             rbp
 subtract groundstate:       0
 seqs set:                   1
 seqs centered:              0
-chars per atom:             1
+chars per atom:             10
 closed:                     0
 unit length:                1.0
 unit energy:                1.0
 
 Seqs
 
-1 A
-2 T
-3 C
+1 ATCGATGGAT
+2 TCCTAGGATA
+3 CCCGATATCC
 ...
 
 Bonds
@@ -209,19 +209,28 @@ Angles
 2 2 2 3 4
 ...
 
+Dihedrals
+
+1 1 1 2 3 4
+2 2 2 3 4 5
+...
+
 Bond Coeffs
 
-1 X0_1 X0_2 X0_3 X0_4 X0_5 X0_6 K_11 K_12 ... K_66
+# upper triangular matrix (21 entries, row-wise assignment)
+1 X0_1 X0_2 X0_3 X0_4 X0_5 X0_6 K_11 K_12 ... K_22 K_23 ... K_55 K_56 K_66
 ...
 
 Angle Coeffs
 
-1 X0a_1 ... X0a_6 X0b_1 ... X0b_6 K_11 K_12 ... K_66
+# full matrix (36 entries, row-wise assignment)
+1 X0a_1 ... X0a_6 X0b_1 ... X0b_6 K_11 K_12 ... K_16 K_21 ... K_66
 ...
 
 Dihedral Coeffs
 
-1 X0a_1 ... X0a_6 X0b_1 ... X0b_6 K_11 K_12 ... K_66
+# full matrix (36 entries, row-wise assignment)
+1 X0a_1 ... X0a_6 X0b_1 ... X0b_6 K_11 K_12 ... K_16 K_21 ... K_66
 ...
 ```
 
