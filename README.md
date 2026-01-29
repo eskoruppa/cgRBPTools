@@ -590,11 +590,11 @@ python -m cgrbptools.lmp_input -seqfn Examples/200bp -vis -bpst
 
 cgRBPtools supports three base pair step stiffness libraries through the PolyCG backend:
 
-| Model | Description | Recommended Use |
-|-------|-------------|-----------------|
-| `cgnaplus` (default) | Most comprehensive model from all-atom MD, includes intra-bp coordinates | General applications, best accuracy |
-| `md` | Parameters from MD simulations (Lankaš et al. 2003) | When cgNA+ is too computationally intensive |
-| `crystal` | Parameters from crystallographic data (Olson et al. 1998) | Structural analysis, historical comparison |
+| Model | Description |
+|-------|-------------|
+| `cgnaplus` (default) | Most comprehensive model from all-atom MD, includes intra-bp coordinates |
+| `md` | Parameters from MD simulations (Lankaš et al. 2003) |
+| `crystal` | Parameters from crystallographic data (Olson et al. 1998) |
 
 
 ---
