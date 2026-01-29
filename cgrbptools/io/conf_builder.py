@@ -6,8 +6,6 @@ from ..SO3 import so3
 from .lmp_topol import CGRBPTopology
 from .lmp_conf import CGRBPConf
 
-
-    
 class ConfBuilder:
     
     mapping = {
