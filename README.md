@@ -592,7 +592,7 @@ cgRBPtools supports three base pair step stiffness libraries through the PolyCG 
 
 | Model | Description |
 |-------|-------------|
-| `cgnaplus` (default) | Most recent molecular dynamics derived elasticity database. Parameters are marginalized from the higher-order model that includes rigid bases and rigid phosphates. |
+| `cgnaplus` (default) | Most recent molecular dynamics derived elasticity database. Parameters are marginalized from the higher-order model that includes rigid bases and rigid phosphates. (Sharma et al. 2023) |
 | `md` | Parameters from MD simulations (Lankaš et al. 2003) |
 | `crystal` | Parameters from crystallographic data (Olson et al. 1998) |
 
