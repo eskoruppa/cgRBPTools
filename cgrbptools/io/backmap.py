@@ -6,7 +6,7 @@ from scipy.interpolate import splprep, splev
 
 from ..SO3 import so3
 from .lmp_topol import CGRBPTopology
-from .lmp_conf import CGRBPConf
+# from .lmp_conf import CGRBPConf
 
 
 CGRBP_BACKMAP_CLOSURE_MAX_DISTANCE_PER_BP = 0.68
@@ -156,15 +156,21 @@ def linear_interpolate_constant_arclength_segments(
     curve[::composite_size] = pts
     return curve
 
+
 def dna_backmap(
-    conf: CGRBPConf,
+    conf: "CGRBPConf",
+    # topology: CGRBPTopology | None = None,
     composite_size: int | None = None,
-    topology: CGRBPTopology | None = None,
     spline_interpolation: bool = True,
     closed: bool | None = None,
     verbose: bool = False,
     ) -> np.ndarray:
     """Backmap coarse-grained rigid base pair configuration to base pair step configuration."""
+    
+    if not conf.topology_set():
+        raise ValueError("CGRBPConf must have a topology set for backmapping.")
+    topology = conf.topology
+    
     if composite_size is None and topology is None:
         raise ValueError("Either composite_site or topology must be provided")
     if topology is not None:
@@ -177,43 +183,64 @@ def dna_backmap(
     if verbose:
         print(f'Backmapping configuration with {len(conf.poses)} CGRBP poses at composite size {composite_size}.')
     
+    conf_poses = conf.poses_in_nm()
+    
     _closed = False
     if topology is not None:
         _closed = topology.closed
     if closed is not None:
         _closed = closed
 
+    def _avg_discretization(poses: np.ndarray) -> float:
+        total_dist = 0.0
+        nsteps = len(poses) - 1
+        for i in range(nsteps):
+            total_dist += np.linalg.norm(poses[i+1,:3,3] - poses[i,:3,3])
+        return total_dist / nsteps
+    
+    def _append_single_pose(poses: np.ndarray, composite_size: int) -> np.ndarray:
+        avg_disc = _avg_discretization(poses)
+        add_pose = poses[-1].copy()
+        add_pose[:3,3] += add_pose[:3,2] * avg_disc
+        R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
+        add_pose[:3,:3] = add_pose[:3,:3] @ R
+        return np.concatenate((poses, add_pose[None]), axis=0)
+
     if _closed:
         if verbose:
             print(" Backmapping closed configuration")
         # check if first and last poses are at right distance
-        dist = np.linalg.norm(conf.poses[0,:3,3] - conf.poses[-1,:3,3])
+        dist = np.linalg.norm(conf_poses[0,:3,3] - conf_poses[-1,:3,3])
         if dist <= CGRBP_BACKMAP_CLOSURE_MAX_DISTANCE_PER_BP*composite_size:
             if verbose:
-                print(f' First and last pose are within {dist:.2f} A, closing the loop.')
-            cg_poses = np.concatenate((conf.poses, conf.poses[0][None]), axis=0)
+                print(f' First and last pose are within {dist:.2f} nm, closing the loop.')
+            cg_poses = np.concatenate((conf_poses, conf_poses[0][None]), axis=0)
         else:
             if verbose:
                 print(" First and last pose are not within closure distance, extending along last tangent.")
-            def _avg_discretization(poses: np.ndarray) -> float:
-                total_dist = 0.0
-                nsteps = len(poses) - 1
-                for i in range(nsteps):
-                    total_dist += np.linalg.norm(poses[i+1,:3,3] - poses[i,:3,3])
-                return total_dist / nsteps
-            avg_disc = _avg_discretization(conf.poses)
-            add_pose = poses[-1].copy()
-            add_pose[:3,3] += add_pose[:3,2] * avg_disc * composite_size
-            R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
-            add_pose[:3,:3] = add_pose[:3,:3] @ R
-            cg_poses = np.concatenate((conf.poses, add_pose[None]), axis=0)
-        pts = cg_poses[:, :3, 3]
+            # avg_disc = _avg_discretization(conf_poses)
+            # add_pose = conf_poses[-1].copy()
+            # add_pose[:3,3] += add_pose[:3,2] * avg_disc
+            # R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
+            # add_pose[:3,:3] = add_pose[:3,:3] @ R
+            # cg_poses = np.concatenate((conf_poses, add_pose[None]), axis=0)
+            cg_poses = _append_single_pose(conf_poses, composite_size)
     else:  
         if verbose:
             print(" Backmapping open configuration")
-        cg_poses = conf.poses
-        pts = cg_poses[:, :3, 3]
-    
+        if (len(conf_poses)-1)*composite_size + 1 == len(topology.sequence):
+            cg_poses = conf_poses.copy()
+        else:
+            if verbose: 
+                print(" Extending last pose to match number of base pairs.")
+            # avg_disc = _avg_discretization(conf_poses)
+            # add_pose = conf_poses[-1].copy()
+            # add_pose[:3,3] += add_pose[:3,2] * avg_disc
+            # R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
+            # add_pose[:3,:3] = add_pose[:3,:3] @ R
+            # cg_poses = np.concatenate((conf_poses, add_pose[None]), axis=0)
+            cg_poses = _append_single_pose(conf_poses, composite_size)
+    pts = cg_poses[:, :3, 3].copy()
     
     if spline_interpolation:
         if verbose:
@@ -228,7 +255,7 @@ def dna_backmap(
     if closed:
         poses[-1] = poses[0]
     if not _closed:
-        poses[-1] = conf.poses[-1]
+        poses[-1] = conf_poses[-1]
     nsteps = len(pts)-1
 
     def _project_to_plane(R: np.ndarray):
@@ -281,4 +308,6 @@ def dna_backmap(
         
     if _closed:
         poses = poses[:-1]
+    else:
+        poses = poses[:len(topology.sequence)]
     return poses

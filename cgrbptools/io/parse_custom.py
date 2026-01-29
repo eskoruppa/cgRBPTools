@@ -290,7 +290,7 @@ class LMPCustom:
         return so3.quats2mats(quats)
 
 
-    def se3(self, unwrap: bool = True, reduced: bool = False) -> np.ndarray:
+    def poses(self, unwrap: bool = True, reduced: bool = False) -> np.ndarray:
         """
         Return SE(3) blocks taus of shape (N, A, 3, 4) or (N, A, 4, 4).
 

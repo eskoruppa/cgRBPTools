@@ -9,8 +9,78 @@ from .lmp_conf import CGRBPConf
 
     
 class ConfBuilder:
+    
+    mapping = {
+        "circ": "circular",
+        "circular": "circular",
+        "closed": "circular",
+        "str": "straight",
+        "straight": "straight",
+        "linear": "straight",
+        "line": "straight",
+        "shape": "ground_state",
+        "ground_state": "ground_state",
+        "groundstate": "ground_state",
+        "gs": "ground_state",
+    }
+    
     def __init__(self, topology: CGRBPTopology):
         self.topology = topology
+     
+    @classmethod
+    def mapping_dict(cls) -> dict[str, str]:
+        """
+        Get the mapping dictionary of configuration types to method names.
+        
+        Returns
+        -------
+        dict[str, str]
+            Dictionary mapping configuration type strings to method names.
+        """
+        return cls.mapping
+    
+    @classmethod
+    def build(
+        cls,
+        topology: CGRBPTopology,
+        conf_type: str,
+        mass: float = 1,
+        verbose = False,
+    ) -> CGRBPConf:
+        """
+        Build a CGRBPConf of the specified type using the stored topology.
+        
+        Parameters
+        ----------
+        conf_type : str
+            Type of configuration to build. Supported types are:
+            - "straight" or "str": Straight chain configuration.
+            - "circular" or "circ": Circular configuration.
+            - "shape": (Not implemented in this method)
+        mass : float, optional
+            Mass of each base pair. Must be positive. Default is 1.
+        
+        Returns
+        -------
+        CGRBPConf
+            Generated configuration object.
+        
+        Raises
+        ------
+        ValueError
+            If conf_type is not recognized.
+        
+        """
+        conf_type_lower = conf_type.lower()
+        if conf_type_lower not in cls.mapping:
+            raise ValueError(f"Unsupported conf_type '{conf_type}'. Supported types are: {list(cls.mapping.keys())}")
+        
+        method_name = cls.mapping[conf_type_lower]
+        method = getattr(cls, method_name)
+        if verbose:
+            print(f"Generating configuration using method: {method_name}.")
+        return method(topology, mass=mass)
+        
 
 
     @classmethod

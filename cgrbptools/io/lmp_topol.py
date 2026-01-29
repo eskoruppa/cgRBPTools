@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 from functools import cached_property
 
+from .path_methods import create_relative_path
+from .unit_conversion import RescaleUnits
+
 
 LMP_RBP_DIMS = 6
 CGRBP_DEFAULT_BOND_STYLE = 'rbp'
@@ -37,6 +40,15 @@ LMP_TOPOL_ID_SEQS_SET = 'seqs set'
 LMP_TOPOL_ID_SEQS_CENTERED = 'seqs centered'
 LMP_TOPOL_ID_CHARS_PER_ATOM = 'chars per atom'
 LMP_TOPOL_ID_CLOSED = 'closed'   
+LMP_TOPOL_UNIT_LENGTH = 'unit length'
+LMP_TOPOL_UNIT_ENERGY = 'unit energy'
+LMP_TOPOL_SUBTRACT_GS = 'subtract groundstate' 
+
+# Groundstate validation bounds (in nm)
+# Translational components should be within these bounds to catch unit errors
+LMP_TOPOL_GROUNDSTATE_REF_LENGTH = 0.34  # Reference length (nm) for one base pair step
+LMP_TOPOL_GROUNDSTATE_MIN_FACTOR = 0.33  # Minimum as fraction of reference
+LMP_TOPOL_GROUNDSTATE_MAX_FACTOR = 3.00  # Maximum as fraction of reference
 
 ##################################################################################################################
 ##################################################################################################################
@@ -209,7 +221,7 @@ class RBPCoeffsBase(ABC):
     def __init__(
         self,
         gs1: np.ndarray,
-        stiffmat: np.ndarray | spmatrix,
+        stiffness_matrix: np.ndarray | spmatrix,
         decimals: int | None,
         gs2: np.ndarray | None = None,
         additional_coeffs: np.ndarray | None = None,
@@ -223,7 +235,7 @@ class RBPCoeffsBase(ABC):
         self._deleted = False
 
         self.X0_1 = to_dense(gs1)
-        self.stiff = to_dense(stiffmat)
+        self.stiff = to_dense(stiffness_matrix)
         self.X0_2 = to_dense(gs2)
         self.extra = to_dense(additional_coeffs)
         if self.extra is not None:
@@ -244,7 +256,7 @@ class RBPCoeffsBase(ABC):
     def create(
         cls,
         gs1: np.ndarray,
-        stiffmat: np.ndarray | spmatrix,
+        stiffness_matrix: np.ndarray | spmatrix,
         decimals: int | None,
         gs2: np.ndarray | None = None,
         *,
@@ -252,7 +264,7 @@ class RBPCoeffsBase(ABC):
         additional_coeffs: np.ndarray | None = None,
     ):
         tmp_X0_1 = to_dense(gs1)
-        tmp_stiff = to_dense(stiffmat)
+        tmp_stiff = to_dense(stiffness_matrix)
         tmp_X0_2 = to_dense(gs2)
         tmp_extra = to_dense(additional_coeffs)
         if tmp_extra is not None:
@@ -274,7 +286,7 @@ class RBPCoeffsBase(ABC):
             if existing is not None:
                 return existing
 
-        return cls(gs1, stiffmat, decimals, gs2=gs2, additional_coeffs=additional_coeffs)
+        return cls(gs1, stiffness_matrix, decimals, gs2=gs2, additional_coeffs=additional_coeffs)
 
     @abstractmethod
     def _compute_hash(self) -> int:
@@ -746,7 +758,7 @@ class CGRBPTopology:
         Lists of unique coefficient objects (RBPBondCoeffs, etc.).
     groundstate : ndarray
         Groundstate configuration vectors for each junction.
-    stiffmat : ndarray or sparse matrix
+    stiffness_matrix : ndarray or sparse matrix
         Stiffness matrix encoding mechanical coupling.
     couplings_set : bool
         Whether interactions have been initialized.
@@ -769,11 +781,11 @@ class CGRBPTopology:
     >>> 
     >>> # Define groundstate and stiffness for 10 base pairs (9 junctions)
     >>> groundstate = np.zeros((9, 6))  # 9 junctions, 6 DOF each
-    >>> stiffmat = csr_matrix((54, 54))  # 9*6 x 9*6 stiffness matrix
+    >>> stiffness_matrix = csr_matrix((54, 54))  # 9*6 x 9*6 stiffness matrix
     >>> 
     >>> # Create topology
     >>> topology = CGRBPTopology(coupling_range=2, decimals=6, closed=False)
-    >>> topology.set_params(groundstate, stiffmat)
+    >>> topology.set_params(groundstate, stiffness_matrix)
     >>> 
     >>> # Add sequence information
     >>> topology.set_sequence('ATCGATCGAT', chars_per_atom=1)
@@ -855,10 +867,13 @@ class CGRBPTopology:
         
         self.groundstate = None
         
-        self.stiffmat = None
+        self.stiffness_matrix = None
         self.extra_bond = None
         self.extra_angle = None
         self.extra_dihedral = None
+        
+        self.unit_length = 1.0
+        self.unit_energy = 1.0
         
         
     @property
@@ -958,6 +973,170 @@ class CGRBPTopology:
         if hasattr(self, 'atom_seqs') and self.atom_seqs is not None:
             return ''.join(self.atom_seqs)
         return None
+    
+    @property 
+    def composite_size(self) -> int:
+        """Numbers of base pairs per atom. This is the same as chars_per_atom."""
+        return self.chars_per_atom
+    
+    def get_groundstate(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray:
+        """
+        Get the groundstate configuration.
+        
+        The groundstate is stored internally in rescaled units. The original can be retrieved by setting
+        length_rescaled and energy_rescaled to False.
+
+        Parameters
+        ----------
+        length_rescaled : bool, optional
+            If True (default), return groundstate in rescaled units.
+            If False, return in native physical units (the original unit_length).
+        energy_rescaled : bool, optional
+            If True (default), return groundstate in rescaled units.
+            If False, return in native physical units (the original unit_energy).
+            Note: Groundstate components don't directly depend on energy, but this is
+            kept for API consistency with get_stiffness_matrix().
+
+        Returns
+        -------
+        np.ndarray
+            Groundstate configuration array with shape (nbps, 6).
+            First 3 components are rotational, last 3 are translational.
+        """
+        if self.groundstate is None:
+            raise ValueError("Groundstate is not set.")
+        
+        gs = self.groundstate.copy()
+        if length_rescaled and energy_rescaled:
+            return gs
+
+        unit_length = 1.0 if length_rescaled else self.unit_length
+        unit_energy = 1.0 if energy_rescaled else self.unit_energy
+        rescale = RescaleUnits(length_factor=unit_length, energy_factor=unit_energy)
+        return rescale.rescale_groundstate(self.groundstate) 
+        
+
+    def get_stiffness_matrix(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray:
+        """
+        Get the stiffness matrix.
+        
+        The stiffness matrix is stored internally in rescaled units. The original can be retrieved by setting
+        length_rescaled and energy_rescaled to False.
+
+        Parameters
+        ----------
+        length_rescaled : bool, optional
+            If True (default), return stiffness in rescaled units.
+            If False, return in native physical units (the original unit_length).
+        energy_rescaled : bool, optional
+            If True (default), return stiffness in rescaled units.
+            If False, return in native physical units (the original unit_energy).
+
+        Returns
+        -------
+        np.ndarray or scipy.sparse matrix
+            Stiffness matrix with shape (6*nbps, 6*nbps).
+            Units: [energy] / ([length]^2 for translational-translational blocks,
+                              [length] for rotational-translational blocks,
+                              dimensionless for rotational-rotational blocks)
+                              
+        """
+        if self.stiffness_matrix is None:
+            raise ValueError("Stiffness matrix is not set.")
+        
+        sm = self.stiffness_matrix.copy()
+        if length_rescaled and energy_rescaled:
+            return sm
+
+        unit_length = 1.0 if length_rescaled else self.unit_length
+        unit_energy = 1.0 if energy_rescaled else self.unit_energy
+        rescale = RescaleUnits(length_factor=unit_length, energy_factor=unit_energy)
+        return rescale.rescale_stiffness(self.stiffness_matrix)
+    
+    
+    def set_unit_length(self, unit_length: float) -> None:
+        """
+        Set the unit length for the topology.
+
+        Parameters
+        ----------
+        unit_length : float
+            Unit length in nanometers. Must be positive.
+            
+        Raises
+        ------
+        TypeError
+            If unit_length is not a float or int.
+        ValueError
+            If unit_length is not positive.
+        """
+        if not isinstance(unit_length, (float, int)):
+            raise TypeError("unit_length must be a float or int.")
+        if unit_length <= 0:
+            raise ValueError("unit_length must be positive.")
+        if not self.couplings_set:
+            raise ValueError("Couplings must be set before changing unit length. stiffness matrix and groundstate must be passed in units of nm.")
+        
+        if self.couplings_set:
+            rescale_factor = self.unit_length / unit_length
+            if rescale_factor != 1.0:
+                rescale = RescaleUnits(length_factor=rescale_factor)
+                self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
+                self._init_couplings()
+        self.unit_length = unit_length
+        
+  
+    def reset_unit_length(self) -> None:
+        """
+        Reset the unit length to 1.0 nm.
+        """
+        self.set_unit_length(1.0)
+        
+    
+    def set_unit_energy(self, unit_energy: float) -> None:
+        """
+        Set the unit energy for the topology.
+
+        Parameters
+        ----------
+        unit_energy : float
+            Unit energy in kT. Must be positive.
+            
+        Raises
+        ------
+        TypeError
+            If unit_energy is not a float or int.
+        ValueError
+            If unit_energy is not positive.
+        """
+        if not isinstance(unit_energy, (float, int)):
+            raise TypeError("unit_energy must be a float or int.")
+        if unit_energy <= 0:
+            raise ValueError("unit_energy must be positive.")
+        if not self.couplings_set:
+            raise ValueError("Couplings must be set before changing unit energy. stiffness matrix must be passed in units of kT.")
+        
+        
+        if self.couplings_set:
+            rescale_factor = self.unit_energy / unit_energy
+            if rescale_factor != 1.0:
+                rescale = RescaleUnits(energy_factor=rescale_factor)
+                self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
+                self._init_couplings()
+        self.unit_energy = unit_energy
+        
+    def reset_unit_energy(self) -> None:
+        """
+        Reset the unit energy to 1.0 kT.
+        """
+        self.set_unit_energy(1.0)
+    
+    def reset_rescaling(self) -> None:
+        """
+        Reset both unit length and unit energy to 1.0.
+        """
+        self.set_unit_length(1.0)
+        self.set_unit_energy(1.0)
     
     @closed.setter
     def closed(self, value: bool) -> None:
@@ -1084,12 +1263,13 @@ class CGRBPTopology:
         
     def set_params( self,
                     groundstate: np.ndarray, 
-                    stiffmat: np.ndarray | spmatrix,
+                    stiffness_matrix: np.ndarray | spmatrix,
                     coupling_range: int | None = None,
                     closed: bool | None = None,
                     extra_bond: np.ndarray | None = None,
                     extra_angle: np.ndarray | None = None,
                     extra_dihedral: np.ndarray | None = None,
+                    validation: bool = False,
                   ) -> None:
         """ 
             Set interaction parameters (groundstate, stiffness and coupling ranges)
@@ -1114,16 +1294,51 @@ class CGRBPTopology:
         self.nbps = len(groundstate)
         self.nbp = self.nbps if self._closed else self.nbps+1
         
+        
+        ############# RECONSIDER THIS #########################
+        # PROBLEM: this would require the composite size to be defined before calling set_params(), or as an argument
+        # of set_params().
+        #        
+        # # Validate translational components of groundstate
+        # # Check that the translational components (last 3 of each 6-vector) are in a reasonable range
+        # # This helps catch cases where unit_length was not set to 1.0 nm
+        # gs_array = np.asarray(groundstate)
+        # trans_components = gs_array[:, 3:6]  # Last 3 components are translational
+        
+        # # Calculate magnitude of each translational vector
+        # trans_magnitudes = np.linalg.norm(trans_components, axis=1)
+        
+        # min_bound = LMP_TOPOL_GROUNDSTATE_MIN_FACTOR * LMP_TOPOL_GROUNDSTATE_REF_LENGTH
+        # max_bound = LMP_TOPOL_GROUNDSTATE_MAX_FACTOR * LMP_TOPOL_GROUNDSTATE_REF_LENGTH
+        
+        # invalid_indices = np.where((trans_magnitudes < min_bound) | (trans_magnitudes > max_bound))[0]
+        
+        # if len(invalid_indices) > 0:
+        #     invalid_mags = trans_magnitudes[invalid_indices]
+        #     err_msg = (
+        #         f"Groundstate translational components are out of valid range [{min_bound:.3f}, {max_bound:.3f}] nm. "
+        #         f"Found {len(invalid_indices)} invalid step(s):\n"
+        #     )
+        #     for idx, mag in zip(invalid_indices[:5], invalid_mags[:5]):  # Show first 5
+        #         err_msg += f"  Step {idx}: magnitude = {mag:.6f} nm\n"
+        #     if len(invalid_indices) > 5:
+        #         err_msg += f"  ... and {len(invalid_indices) - 5} more\n"
+        #     err_msg += (
+        #         f"\nSuggestion: Check that groundstate and stiffness matrix are expressed in units of nm."
+        #         f"Rescaling length units may be done after passing groundstate and stiffness matrix with set_unit_length(unit_length: float)."
+        #     )
+        #     raise ValueError(err_msg)
+        
         # check stiffness matrix consistency
-        if len(stiffmat.shape) != 2:
+        if len(stiffness_matrix.shape) != 2:
             raise ValueError('Stiffness matrix must be two-dimensional.')
-        if stiffmat.shape[0] != self.nbps*6:
+        if stiffness_matrix.shape[0] != self.nbps*6:
             raise ValueError('Dimension of stiffness matrix is incompatible with provided groundstate')
-        if stiffmat.shape != (self.nbps * 6, self.nbps * 6):
+        if stiffness_matrix.shape != (self.nbps * 6, self.nbps * 6):
             raise ValueError("Stiffness matrix must be square with shape (6*nbps, 6*nbps).")
         
-        self.groundstate = groundstate
-        self.stiffmat = stiffmat  
+        self.groundstate = np.array(groundstate)
+        self.stiffness_matrix = stiffness_matrix.copy()  
         
         if extra_bond is not None:
             self.extra_bond = extra_bond
@@ -1131,9 +1346,117 @@ class CGRBPTopology:
             self.extra_angle = extra_angle
         if extra_dihedral is not None:
             self.extra_dihedral = extra_dihedral 
+    
         self._init_couplings()
         
     
+    def _reconstruct_groundstate(self) -> np.ndarray:
+        """
+        Reconstruct the groundstate array from stored bond coefficients.
+        
+        This method reverses the process in _init_couplings() by extracting
+        the groundstate vectors from the bond coefficient objects. Each bond
+        stores the groundstate configuration at its first junction position.
+        
+        Returns
+        -------
+        np.ndarray
+            Reconstructed groundstate array of shape (nbps, 6) containing
+            the configuration vector for each base pair step.
+            
+        Raises
+        ------
+        ValueError
+            If couplings have not been set or no bonds exist.
+        """
+        if not self.couplings_set or not self.bonds:
+            raise ValueError("Couplings must be set and bonds must exist to reconstruct groundstate.")
+        
+        # Initialize groundstate array
+        groundstate = np.zeros((self.nbps, 6), dtype=np.float64)
+        
+        # Extract groundstate from bonds
+        # Each bond stores the groundstate at its first junction (0-indexed: id1-1)
+        for bond in self.bonds:
+            junction_idx = bond.id1 - 1  # Convert 1-indexed atom ID to 0-indexed junction
+            if junction_idx < self.nbps:
+                groundstate[junction_idx] = bond.bondcoeffs.X0_1.copy()
+        return groundstate
+
+    def _reconstruct_stiffness_matrix(self) -> np.ndarray:
+        """
+        Reconstruct the full stiffness matrix from stored bond, angle, and dihedral coefficients.
+        
+        This method reverses the process in _init_couplings() by extracting
+        stiffness blocks from coefficient objects and assembling them into
+        the complete 6*nbps x 6*nbps stiffness matrix.
+        
+        The reconstruction places:
+        - Bond stiffness blocks on diagonal blocks [i, i]
+        - Angle stiffness blocks on off-diagonal blocks [i, i+1] and symmetric [i+1, i]
+        - Dihedral stiffness blocks on off-diagonal blocks [i, i+k] and symmetric [i+k, i]
+        
+        Returns
+        -------
+        np.ndarray
+            Reconstructed stiffness matrix of shape (6*nbps, 6*nbps).
+            The matrix is symmetric.
+            
+        Raises
+        ------
+        ValueError
+            If couplings have not been set.
+        """
+        if not self.couplings_set:
+            raise ValueError("Couplings must be set to reconstruct stiffness matrix.")
+        
+        # Initialize stiffness matrix
+        stiffmat = sp.sparse.lil_matrix((self.nbps * 6, self.nbps * 6), dtype=np.float64)
+        # stiffmat = np.zeros((self.nbps * 6, self.nbps * 6), dtype=np.float64)
+        
+        # Place bond stiffness blocks (diagonal blocks [i, i])
+        for bond in self.bonds:
+            id1 = bond.id1 - 1  # Convert to 0-indexed
+            
+            # Bond stiffness is always on the diagonal block at the first junction
+            i_start = id1 * 6
+            i_end = (id1 + 1) * 6
+            stiffmat[i_start:i_end, i_start:i_end] = bond.bondcoeffs.stiff.copy()
+        
+        # Place angle stiffness blocks (off-diagonal blocks)
+        # Angles connect three consecutive atoms: angle(id1, id2, id3)
+        # Stiffness is stored for coupling between id1 and id2
+        for angle in self.angles:
+            id1 = angle.id1 - 1  # Convert to 0-indexed
+            id2 = angle.id2 - 1
+            
+            i_start = id1 * 6
+            i_end = (id1 + 1) * 6
+            j_start = id2 * 6
+            j_end = (id2 + 1) * 6
+            
+            # Place stiffness block and its transpose (symmetric matrix)
+            stiffmat[i_start:i_end, j_start:j_end] = angle.anglecoeffs.stiff.copy()
+            stiffmat[j_start:j_end, i_start:i_end] = angle.anglecoeffs.stiff.T.copy()
+        
+        # Place dihedral stiffness blocks (off-diagonal blocks)
+        # Dihedrals connect four atoms: dihedral(id1, id2, id3, id4)
+        # Stiffness is stored for coupling between id1 and id3
+        for dihedral in self.dihedrals:
+            id1 = dihedral.id1 - 1  # Convert to 0-indexed
+            id3 = dihedral.id3 - 1
+            
+            i_start = id1 * 6
+            i_end = (id1 + 1) * 6
+            j_start = id3 * 6
+            j_end = (id3 + 1) * 6
+            
+            # Place stiffness block and its transpose (symmetric matrix)
+            stiffmat[i_start:i_end, j_start:j_end] = dihedral.dihedralcoeffs.stiff.copy()
+            stiffmat[j_start:j_end, i_start:i_end] = dihedral.dihedralcoeffs.stiff.T.copy()
+        
+        return stiffmat
+
     def _init_couplings(self) -> None:
         """
         Initialize bonds, angles, and dihedrals from groundstate and stiffness matrix.
@@ -1175,7 +1498,7 @@ class CGRBPTopology:
             if self._closed:
                 i = i % self.nbp
                 j = j % self.nbp
-            return to_dense(self.stiffmat[i*6:(i+1)*6, j*6:(j+1)*6])
+            return to_dense(self.stiffness_matrix[i*6:(i+1)*6, j*6:(j+1)*6])
 
         bonds = []
         angles = []
@@ -1190,7 +1513,7 @@ class CGRBPTopology:
                 id2 = id1 + 1
                 X0 = self.groundstate[id1]
                 # REMOVE
-                # M0 = to_dense(self.stiffmat[id1*6:id2*6,id1*6:id2*6])
+                # M0 = to_dense(self.stiffness_matrix[id1*6:id2*6,id1*6:id2*6])
                 M0 = _get_block(id1,id1)
                 bonds.append(RBPBond(id1+1,id2+1,RBPBondCoeffs.create(X0,M0,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_bond)))
                 
@@ -1201,7 +1524,7 @@ class CGRBPTopology:
                     
                 X0_2 = self.groundstate[id2]
                 # REMOVE
-                # M1 = to_dense(self.stiffmat[id1*6:id2*6,id2*6:id3*6])
+                # M1 = to_dense(self.stiffness_matrix[id1*6:id2*6,id2*6:id3*6])
                 M1 = _get_block(id1,id2)
                 angles.append(RBPAngle(id1+1,id2+1,id3+1,RBPAngleCoeffs.create(X0,M1,gs2=X0_2,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_angle)))
                 
@@ -1212,7 +1535,7 @@ class CGRBPTopology:
                         break
                     X0_2 = self.groundstate[id3]
                     # REMOVE
-                    # Mk = to_dense(self.stiffmat[id1*6:id2*6,id3*6:id4*6])
+                    # Mk = to_dense(self.stiffness_matrix[id1*6:id2*6,id3*6:id4*6])
                     Mk = _get_block(id1,id3)
                     dihedrals.append(RBPDihedral(id1+1,id2+1,id3+1,id4+1,RBPDihedralCoeffs.create(X0,Mk,gs2=X0_2,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_dihedral)))
         
@@ -1225,7 +1548,7 @@ class CGRBPTopology:
 
                 X0 = self.groundstate[i]
                 # REMOVE
-                # M0 = to_dense(self.stiffmat[i*6:(i+1)*6,i*6:(i+1)*6])
+                # M0 = to_dense(self.stiffness_matrix[i*6:(i+1)*6,i*6:(i+1)*6])
                 M0 = _get_block(i,i)
                 bonds.append(RBPBond(id1+1,id2+1,RBPBondCoeffs.create(X0,M0,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_bond)))
                 
@@ -1241,7 +1564,7 @@ class CGRBPTopology:
                     
                 X0_2 = self.groundstate[jj]
                 # REMOVE
-                # M1 = to_dense(self.stiffmat[ii*6:(ii+1)*6,jj*6:(jj+1)*6])
+                # M1 = to_dense(self.stiffness_matrix[ii*6:(ii+1)*6,jj*6:(jj+1)*6])
                 M1 = _get_block(ii,jj)
                 angles.append(RBPAngle(id1+1,id2+1,id3+1,RBPAngleCoeffs.create(X0,M1,gs2=X0_2,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_angle)))
                 
@@ -1252,7 +1575,7 @@ class CGRBPTopology:
                     id4 = (jj+1) % self.nbp
                     X0_2 = self.groundstate[jj]
                     # REMOVE
-                    # Mk = to_dense(self.stiffmat[ii*6:(ii+1)*6,jj*6:(jj+1)*6])
+                    # Mk = to_dense(self.stiffness_matrix[ii*6:(ii+1)*6,jj*6:(jj+1)*6])
                     Mk = _get_block(ii,jj)
                     dihedrals.append(RBPDihedral(id1+1,id2+1,id3+1,id4+1,RBPDihedralCoeffs.create(X0,Mk,gs2=X0_2,decimals=self.decimals,check_existing=self.check_existing,additional_coeffs=self.extra_dihedral)))    
         
@@ -1332,6 +1655,7 @@ class CGRBPTopology:
         if len(seqs[-1]) > self.chars_per_atom:
             raise ValueError("The last atom sequence may be shorter, but not longer than the others.")
         
+        center_pos = 0
         if centered:
             center_pos = self.chars_per_atom // 2
             if len(seqs[-1]) <= center_pos:
@@ -1346,6 +1670,7 @@ class CGRBPTopology:
                 raise ValueError(err_msg)
 
         self.seqs_centered = centered
+        self.center_pos = center_pos
         self.atom_seqs = list(seqs)
         self.seqs_set = True
         
@@ -1486,7 +1811,7 @@ class CGRBPTopology:
         
         return ''.join(lines)
      
-    def coeffs_string(self) -> str:
+    def coeffs_string(self, hybrid: bool = False) -> str:
         """
         Format all coefficient sections as a single string.
 
@@ -1502,15 +1827,15 @@ class CGRBPTopology:
         lines = []
         lines.append('\nBond Coeffs\n\n')
         for bondtype in self.bondtypes:
-            lines.append(f'{bondtype.to_string(hybrid=False)}\n')
+            lines.append(f'{bondtype.to_string(hybrid=hybrid)}\n')
         lines.append('\n')
         lines.append('\nAngle Coeffs\n\n')
         for angletype in self.angletypes:
-            lines.append(f'{angletype.to_string(hybrid=False)}\n')
+            lines.append(f'{angletype.to_string(hybrid=hybrid)}\n')
         lines.append('\n')
         lines.append('\nDihedral Coeffs\n\n')
         for dihedraltype in self.dihedraltypes:
-            lines.append(f'{dihedraltype.to_string(hybrid=False)}\n')
+            lines.append(f'{dihedraltype.to_string(hybrid=hybrid)}\n')
         lines.append('\n')
         return ''.join(lines)
     
@@ -1520,28 +1845,41 @@ class CGRBPTopology:
         filename: Path| str,
         decimals: int | None = None,
         check_existing_types: bool = True,
+        verbose: bool = False,
     ) -> "CGRBPTopology":
         """Read a database file and reconstruct a CGRBPTopology instance.
         
         This classmethod reads a database file created by write_database() and
         reconstructs the topology object with all metadata, coefficients, and
-        optionally connectivity information.
+        optionally connectivity information. The unit_length and unit_energy
+        scaling factors are restored from the file, ensuring that the coefficients
+        are interpreted in the correct physical units.
         
         Parameters
         ----------
-        filename : str
+        filename : str or Path
             Path to the database file to read.
         decimals : int or None, optional
             Number of decimals for coefficient rounding. If None, uses value
             from file or no rounding.
         check_existing_types : bool, optional
             Whether to check for existing coefficient types when reconstructing.
-            Default is False.
+            Default is True.
+        verbose : bool, optional
+            If True, print diagnostic information during parsing. Default is False.
         
         Returns
         -------
         CGRBPTopology
-            Reconstructed topology object.
+            Reconstructed topology object with all coefficients in rescaled units. 
+            The unit_length and unit_energy attributes track the original physical 
+            units for reference.
+            
+        Notes
+        -----
+        The coefficients stored in the database file are in rescaled units. The
+        unit_length and unit_energy values in the file indicate what physical
+        units these correspond to.
         """
         with open(filename, 'r') as f:
             content = f.read()
@@ -1568,6 +1906,8 @@ class CGRBPTopology:
         seqs_centered = bool(int(metadata.get(LMP_TOPOL_ID_SEQS_CENTERED, 0))) if seqs_set else False
         chars_per_atom = int(metadata.get(LMP_TOPOL_ID_CHARS_PER_ATOM, 1)) if seqs_set else 1
         closed = bool(int(metadata.get(LMP_TOPOL_ID_CLOSED, 0)))
+        unit_length = float(metadata.get(LMP_TOPOL_UNIT_LENGTH, 1.0))
+        unit_energy = float(metadata.get(LMP_TOPOL_UNIT_ENERGY, 1.0))
                 
         # Reset all registries before reading
         RBPBondCoeffs.reset_registry()
@@ -1600,8 +1940,9 @@ class CGRBPTopology:
         if current_section is not None:
             sections[current_section] = section_lines
         
-        for key in sections:
-            print(key)
+        if verbose: 
+            for key in sections:
+                print(key)
         
         # Parse coefficient sections
         bondcoeffs_list = []
@@ -1609,11 +1950,11 @@ class CGRBPTopology:
             for line in sections['Bond Coeffs']:
                 if line:
                     bondcoeff = RBPBondCoeffs.from_string(line, bond_style, decimals)
-                    print(bondcoeff.to_string())
+                    if verbose: print(bondcoeff.to_string())
 
                     bondcoeffs_list.append(bondcoeff)
         
-        print('Parsed bond coeffs:', len(bondcoeffs_list))
+        if verbose: print('Parsed bond coeffs:', len(bondcoeffs_list))
         
         anglecoeffs_list = []
         if 'Angle Coeffs' in sections:
@@ -1622,7 +1963,7 @@ class CGRBPTopology:
                     anglecoeff = RBPAngleCoeffs.from_string(line, angle_style, decimals)
                     anglecoeffs_list.append(anglecoeff)
                     
-        print('Parsed angle coeffs:', len(anglecoeffs_list))
+        if verbose: print('Parsed angle coeffs:', len(anglecoeffs_list))
         
         dihedralcoeffs_list = []
         if 'Dihedral Coeffs' in sections:
@@ -1631,7 +1972,7 @@ class CGRBPTopology:
                     dihedralcoeff = RBPDihedralCoeffs.from_string(line, dihedral_style, decimals)
                     dihedralcoeffs_list.append(dihedralcoeff)
         
-        print('Parsed dihedral coeffs:', len(dihedralcoeffs_list))
+        if verbose: print('Parsed dihedral coeffs:', len(dihedralcoeffs_list))
         
         # Parse connectivity sections (if present)
         bonds = []
@@ -1688,13 +2029,19 @@ class CGRBPTopology:
         topology.dihedrals = dihedrals
         topology.couplings_set = True
         
+        topology.unit_length=unit_length
+        topology.unit_energy=unit_energy
+        
+        topology.groundstate = topology._reconstruct_groundstate()
+        topology.stiffness_matrix = topology._reconstruct_stiffness_matrix()
+        
         # Set sequences if present
         if atom_seqs:
             topology.atom_seqs = atom_seqs
             topology.chars_per_atom = chars_per_atom
             topology.seqs_centered = seqs_centered
-            topology.seqs_set = True
-        
+            topology.center_pos = chars_per_atom // 2 if seqs_centered else 0
+            topology.seqs_set = True        
         return topology
     
 
@@ -1713,10 +2060,11 @@ class CGRBPTopology:
         read back using the read_database() classmethod for round-trip serialization.
         
         The database file contains:
-        - Metadata section: nbp, coupling_range, styles, counts, sequence flags, closed
+        - Metadata section: nbp, coupling_range, styles, counts, sequence flags, closed,
+          unit_length, unit_energy
         - Seqs section (optional): Per-atom sequence strings if sequences are set
         - Connectivity sections (optional): Bonds, Angles, Dihedrals with atom indices
-        - Coefficient sections: Bond Coeffs, Angle Coeffs, Dihedral Coeffs
+        - Coefficient sections: Bond Coeffs, Angle Coeffs, Dihedral Coeffs (in LAMMPS units)
         
         Parameters
         ----------
@@ -1735,43 +2083,81 @@ class CGRBPTopology:
         -------
         None
         
+        Notes
+        -----
+        The coefficients are written in rescaled units. The unit_length and unit_energy 
+        values in the metadata indicate what physical units these rescaled units correspond to.
+        
         See Also
         --------
         read_database : Read a database file and reconstruct topology.
         """
-
         filename = Path(filename)
         
         if add_extension:
             filename = filename.with_suffix('.db')
+        create_relative_path(filename)
         
         lines = []
-        lines.append(f'{LMP_TOPOL_ID_NUM_BP}:   {self.nbp}\n')
-        lines.append(f'{LMP_TOPOL_ID_COUP_RANGE}:           {self.coupling_range}\n')
-        if include_connectivity:
-            lines.append(f'{LMP_TOPOL_ID_NUM_BONDS}:          {self.num_bonds}\n')
-            lines.append(f'{LMP_TOPOL_ID_NUM_ANGLES}:         {self.num_angles}\n')
-            lines.append(f'{LMP_TOPOL_ID_NUM_DIHEDRALS}:      {self.num_dihedrals}\n')
-        lines.append(f'{LMP_TOPOL_ID_NUM_BOND_TYPES}:     {self.num_bond_types}\n')
-        lines.append(f'{LMP_TOPOL_ID_NUM_ANGLE_TYPES}:    {self.num_angle_types}\n')
-        lines.append(f'{LMP_TOPOL_ID_NUM_DIHEDRAL_TYPES}: {self.num_dihedral_types}\n')
-        lines.append(f'{LMP_TOPOL_ID_BOND_STYLE}:               {self.bond_style}\n')
-        lines.append(f'{LMP_TOPOL_ID_ANGLE_STYLE}:              {self.angle_style}\n')
-        lines.append(f'{LMP_TOPOL_ID_DIHEDRAL_STYLE}:           {self.dihedral_style}\n')
-        lines.append(f'{LMP_TOPOL_ID_SEQS_SET}:                 {int(self.seqs_set)}\n')
-        if self.seqs_set:
-            lines.append(f'{LMP_TOPOL_ID_SEQS_CENTERED}:            {int(self.seqs_centered)}\n')
-            lines.append(f'{LMP_TOPOL_ID_CHARS_PER_ATOM}:           {int(self.chars_per_atom)}\n')
-        lines.append(f'{LMP_TOPOL_ID_CLOSED}:                   {int(self.closed)}\n\n')
-        # lines.append(f'scaling factor:           {SCALING FACTOR}\n')
+        
+        # metadata section
 
+        def _format_metadata_lines(pairs):
+            max_key_len = max(len(key) for key, _ in pairs)
+            lines = []
+            for key, value in pairs:
+                pad = " " * (max_key_len - len(key) + 1)
+                lines.append(f"{key}:{pad}{value}\n")
+            return lines
+        
+        pairs = [
+            (LMP_TOPOL_ID_NUM_BP, self.nbp),
+            (LMP_TOPOL_ID_COUP_RANGE, self.coupling_range),
+        ]
+
+        if include_connectivity:
+            pairs.extend([
+                (LMP_TOPOL_ID_NUM_BONDS, self.num_bonds),
+                (LMP_TOPOL_ID_NUM_ANGLES, self.num_angles),
+                (LMP_TOPOL_ID_NUM_DIHEDRALS, self.num_dihedrals),
+            ])
+
+        pairs.extend([
+            (LMP_TOPOL_ID_NUM_BOND_TYPES, self.num_bond_types),
+            (LMP_TOPOL_ID_NUM_ANGLE_TYPES, self.num_angle_types),
+            (LMP_TOPOL_ID_NUM_DIHEDRAL_TYPES, self.num_dihedral_types),
+            (LMP_TOPOL_ID_BOND_STYLE, self.bond_style),
+            (LMP_TOPOL_ID_ANGLE_STYLE, self.angle_style),
+            (LMP_TOPOL_ID_DIHEDRAL_STYLE, self.dihedral_style),
+            (LMP_TOPOL_SUBTRACT_GS, 0),
+            (LMP_TOPOL_ID_SEQS_SET, int(self.seqs_set)),
+        ])
+
+        if self.seqs_set:
+            pairs.extend([
+                (LMP_TOPOL_ID_SEQS_CENTERED, int(self.seqs_centered)),
+                (LMP_TOPOL_ID_CHARS_PER_ATOM, int(self.chars_per_atom)),
+            ])
+
+        pairs.extend([
+            (LMP_TOPOL_ID_CLOSED, int(self.closed)),
+            (LMP_TOPOL_UNIT_LENGTH, self.unit_length),
+            (LMP_TOPOL_UNIT_ENERGY, self.unit_energy),
+        ])
+    
+        lines = _format_metadata_lines(pairs)
+        lines.append("\n")
+
+        # sequences section
         if self.seqs_set:
             lines.append(self.sequence_string())
         
+        # connectivity sections
         if include_connectivity:
             lines.append('\n')
             lines.append(self.connectivity_string())
         
+        # coefficient sections
         lines.append(self.coeffs_string())
 
         with open(filename, 'w') as f:
