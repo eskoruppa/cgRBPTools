@@ -584,18 +584,6 @@ Generate ChimeraX scripts with:
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -vis -bpst
 ```
 
-This creates:
-- `.cxc` script that can be opened in ChimeraX
-- `.pdb` structure file referenced by the script
-- `.bild` triads file (if `-bpst` specified)
-
-### Triad Visualization
-
-Triads (local coordinate frames) can be included in visualizations to show base pair orientations:
-- Red arrow: Local x-axis (minor groove direction)
-- Green arrow: Local y-axis (major groove direction)
-- Blue arrow: Local z-axis (helical axis direction)
-
 ---
 
 ## Available DNA Models
