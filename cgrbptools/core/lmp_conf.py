@@ -503,6 +503,5 @@ class CGRBPConf:
         visualize_xyz(
             base_fn, 
             1, 
-            poses=self.poses, 
-            start_id=0
+            poses=self.poses,
         )

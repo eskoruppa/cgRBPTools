@@ -11,11 +11,13 @@ class ConfBuilder:
     mapping = {
         "circ": "circular",
         "circular": "circular",
+        "circle": "circular",
         "closed": "circular",
         "str": "straight",
         "straight": "straight",
         "linear": "straight",
         "line": "straight",
+        "lin": "straight",
         "shape": "ground_state",
         "ground_state": "ground_state",
         "groundstate": "ground_state",

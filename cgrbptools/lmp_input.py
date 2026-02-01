@@ -341,7 +341,6 @@ if __name__ == "__main__":
     ##################################################
     ########## Generate XYZ ##########################
     if args.gen_xyz:
-        print('GENERATING XYZ FILE')
         conf.visualize_xyz(base_fn)
     
     
