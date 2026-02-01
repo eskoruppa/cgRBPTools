@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 
 # load sequence from sequence file
 
-from .io.lmp_topol import CGRBPTopology
-from .io.unit_conversion import RescaleUnits
+from .core.lmp_topol import CGRBPTopology
+from .core.unit_conversion import RescaleUnits
 from .io.parse_custom import LMPCustom
 
 from .evals.se3 import extract_se3_parameters 

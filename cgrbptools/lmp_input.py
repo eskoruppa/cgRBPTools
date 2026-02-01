@@ -8,10 +8,10 @@ from pathlib import Path
 from .PolyCG.polycg import gen_params, load_sequence, write_seqfile
 # from .PolyCG.polycg import visualize_chimerax, visualize_pdb, visualize_xyz
 
-from .io.lmp_topol import CGRBPTopology
-from .io.conf_builder import ConfBuilder
+from .core.lmp_topol import CGRBPTopology
+from .core.conf_builder import ConfBuilder
+from .core.matrix_methods import rescale_stiff
 # from .io.unit_conversion import RescaleUnits
-from .io.matrix_methods import rescale_stiff
 # from .io.backmap import dna_backmap
 
 GEN_INPUT_CGNAP_SETNAME = 'curves_plus'
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '-dec',     
         '--decimals',           
-        type=int, default = 2,
+        type=int, default = 4,
         help='Number of decimal places for output formatting (default: 2)')
     parser.add_argument(
         '-mass',    

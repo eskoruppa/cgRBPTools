@@ -5,12 +5,14 @@ import numpy as np
 from pathlib import Path
 from .lmp_topol import CGRBPTopology
 from .lmp_conf import CGRBPConf
-from .backups import backup_filename
+from ..io.backups import backup_filename
 
 # Constants
 CGRBP_DEFAULT_MARGIN_FRACTION = 0.05
 CGRBP_DEFAULT_BOX_DECIMALS = 1
 CGRBP_DATA_EXTENSION = '.data'
+
+# DEPRICATED!
 
 
 def cgrbp_datafile(

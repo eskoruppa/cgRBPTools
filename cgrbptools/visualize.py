@@ -4,8 +4,8 @@ import sys, os
 import argparse
 from pathlib import Path
 
-from .io.lmp_topol import CGRBPTopology
-from .io.conf_builder import ConfBuilder
+from .core.lmp_topol import CGRBPTopology
+from .core.conf_builder import ConfBuilder
 from .io.parse_custom import LMPCustom
 
 ###################################################################################################

@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 from functools import cached_property
 
-from .path_methods import create_relative_path
+from ..io.path_methods import create_relative_path
 from .unit_conversion import RescaleUnits
 
 
