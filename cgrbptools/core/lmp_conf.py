@@ -480,7 +480,6 @@ class CGRBPConf:
         if self.topology.composite_size > 1:
             bp_poses = dna_backmap(self,verbose=False)
         else:
-            bead_radius = 0
             bp_poses = self.poses_in_nm()
         visualize_pdb(
             base_fn, 
