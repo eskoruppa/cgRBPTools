@@ -3,8 +3,8 @@ from __future__ import annotations
 import os
 import numpy as np
 from pathlib import Path
-from .lmp_topol import CGRBPTopology
-from .lmp_conf import CGRBPConf
+from .topology import CGRBPTopology
+from .configuration import CGRBPConf
 from ..io.backups import backup_filename
 
 # Constants

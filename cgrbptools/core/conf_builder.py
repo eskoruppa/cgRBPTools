@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 
 from ..SO3 import so3
-from .lmp_topol import CGRBPTopology
-from .lmp_conf import CGRBPConf
+from .topology import CGRBPTopology
+from .configuration import CGRBPConf
 
 class ConfBuilder:
     

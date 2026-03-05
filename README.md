@@ -16,22 +16,21 @@ The package interfaces with the **CG-RBP** LAMMPS extension, which implements cu
 
 ## Installation
 
-### Requirements
-- Python 3.9 or higher
-- NumPy
-- SciPy
-- Numba (for JIT compilation)
-- Matplotlib (for visualization)
-
-### Download
-
-Clone the repository with recursive submodules:
+Clone the repository (recursive submodules required for the [PolyCG](cgrbptools/PolyCG/README.md) library and the [cgNA+](https://lcvmwww.epfl.ch/cgDNA/) parameter database):
 
 ```bash
 git clone --recurse-submodules -j8 git@github.com:eskoruppa/cgRBPTools.git
+cd cgRBPTools
 ```
 
-The recursive clone is necessary to include the [PolyCG](cgrbptools/PolyCG/README.md) coarse-graining library and the [cgNA+](https://lcvmwww.epfl.ch/cgDNA/) parameter database.
+Then install with pip (add `-e` for an editable/development install):
+
+```bash
+pip install .        # standard install
+pip install -e .     # editable install
+```
+
+Dependencies (NumPy, SciPy, Numba, Matplotlib) are installed automatically. Python 3.9 or higher is required.
 
 ## Quick Start
 

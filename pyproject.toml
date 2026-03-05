@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cgrbptools"
+version = "0.0.1"
+description = "Tools for generating, mapping, backmapping, and analyzing coarse-grained rigid base pair (cgRBP) DNA simulations in LAMMPS"
+readme = "README.md"
+authors = [{ name = "Enrico Skoruppa", email = "enrico.skoruppa@gmail.com" }]
+license = { text = "GPL-2.0" }
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24",
+    "numba>=0.57",
+    "scipy>=1.10",
+    "matplotlib>=3.6",
+]
+
+[project.urls]
+Repository = "https://github.com/eskoruppa/cgRBPTools"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cgrbptools*"]

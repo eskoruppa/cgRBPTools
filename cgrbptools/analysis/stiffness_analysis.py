@@ -78,39 +78,6 @@ def se3_coords2mats(X: np.ndarray) -> np.ndarray:
         return out.reshape(lead_shape + first.shape)
 
 
-
-
-
-
-
-
-
-
-# def se3_deforms(se3: np.ndarray, gs: np.ndarray, subtract: bool = True) -> np.ndarray:
-    
-#     if gs.shape[-1] != 6 and (gs.shape[-1] != 4 or gs.shape[-2] != 4):
-#         raise ValueError(f'Invalid dimension of gs. Elements of gs should be either coordinates (6 components) or elements of se3 (4x4 matrices).')
-    
-#     if subtract:
-#         if gs.shape[-1] == 4:
-#             X0 = so3.se3_coords(gs)
-#         else:
-#             X0 = gs
-        
-        
-#     else:
-#         if gs.shape[-1] == 6:
-            
-        
-        
-    
-#     if gs.shape[-1] == 6:
-        
-    
-    
-    
-
-
 def eval_deforms(triads,S,pos,vs):
     Phis = np.zeros((len(triads),len(triads[0])-1,3))
     for s in range(len(Phis)):

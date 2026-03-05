@@ -874,6 +874,8 @@ class CGRBPTopology:
         
         self.unit_length = 1.0
         self.unit_energy = 1.0
+
+        self._subtract_groundstate = False
         
         
     @property
@@ -979,6 +981,15 @@ class CGRBPTopology:
         """Numbers of base pairs per atom. This is the same as chars_per_atom."""
         return self.chars_per_atom
     
+    @property
+    def subtract_groundstate(self) -> bool:
+        """Dynamic component is found via groundstate subtraction in se(3)"""
+        return self._subtract_groundstate
+    
+    def set_subtract_groundstate(self, subtract_groundstate: bool) -> None:
+        """Set whether to subtract the groundstate from the dynamic component."""
+        self._subtract_groundstate = subtract_groundstate
+    
     def get_groundstate(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray:
         """
         Get the groundstate configuration.
@@ -1015,8 +1026,8 @@ class CGRBPTopology:
         rescale = RescaleUnits(length_factor=unit_length, energy_factor=unit_energy)
         return rescale.rescale_groundstate(self.groundstate) 
         
-
-    def get_stiffness_matrix(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray:
+        
+    def get_stiffness_matrix(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray | spmatrix:
         """
         Get the stiffness matrix.
         
@@ -1115,7 +1126,6 @@ class CGRBPTopology:
             raise ValueError("unit_energy must be positive.")
         if not self.couplings_set:
             raise ValueError("Couplings must be set before changing unit energy. stiffness matrix must be passed in units of kT.")
-        
         
         if self.couplings_set:
             rescale_factor = self.unit_energy / unit_energy
@@ -1269,6 +1279,7 @@ class CGRBPTopology:
                     extra_bond: np.ndarray | None = None,
                     extra_angle: np.ndarray | None = None,
                     extra_dihedral: np.ndarray | None = None,
+                    subtract_groundstate: bool = False,
                     validation: bool = False,
                   ) -> None:
         """ 
@@ -1278,6 +1289,7 @@ class CGRBPTopology:
         
         self.set_closed(closed)
         self.set_coupling_range(coupling_range)
+        self._subtract_groundstate = subtract_groundstate
         
         # Check groundstate consistency
         
@@ -1908,6 +1920,7 @@ class CGRBPTopology:
         closed = bool(int(metadata.get(LMP_TOPOL_ID_CLOSED, 0)))
         unit_length = float(metadata.get(LMP_TOPOL_UNIT_LENGTH, 1.0))
         unit_energy = float(metadata.get(LMP_TOPOL_UNIT_ENERGY, 1.0))
+        subtract_groundstate = bool(int(metadata.get(LMP_TOPOL_SUBTRACT_GS, 0))) 
                 
         # Reset all registries before reading
         RBPBondCoeffs.reset_registry()
@@ -2028,6 +2041,7 @@ class CGRBPTopology:
         topology.angles = angles
         topology.dihedrals = dihedrals
         topology.couplings_set = True
+        topology._subtract_groundstate = subtract_groundstate
         
         topology.unit_length=unit_length
         topology.unit_energy=unit_energy
@@ -2129,7 +2143,7 @@ class CGRBPTopology:
             (LMP_TOPOL_ID_BOND_STYLE, self.bond_style),
             (LMP_TOPOL_ID_ANGLE_STYLE, self.angle_style),
             (LMP_TOPOL_ID_DIHEDRAL_STYLE, self.dihedral_style),
-            (LMP_TOPOL_SUBTRACT_GS, 0),
+            (LMP_TOPOL_SUBTRACT_GS, int(self._subtract_groundstate)),
             (LMP_TOPOL_ID_SEQS_SET, int(self.seqs_set)),
         ])
 

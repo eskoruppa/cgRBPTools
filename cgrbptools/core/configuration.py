@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 
 from ..SO3 import so3
-from .lmp_topol import CGRBPTopology
+from .topology import CGRBPTopology
 from ..io.backups import backup_filename
 from ..io.path_methods import create_relative_path
 from ..PolyCG.polycg.out.visualization import visualize_chimerax, visualize_pdb, visualize_xyz

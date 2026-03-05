@@ -9,17 +9,16 @@ import matplotlib.pyplot as plt
 
 # load sequence from sequence file
 
-from .core.lmp_topol import CGRBPTopology
+from .core.topology import CGRBPTopology
 from .core.unit_conversion import RescaleUnits
 from .io.parse_custom import LMPCustom
 
-from .evals.se3 import extract_se3_parameters 
-from .evals.stiffness import marginalize_stiffness_matrix
+from .evals.stiffness import diagonal_marginals, eval_gs_and_stiffness
+
 
 def cm_to_inch(cm):
     """Convert centimeters to inches."""
     return cm / 2.54
-
 
 def plot_gs_and_mean_params(gs: np.ndarray, mean_params: np.ndarray, savefig: str | None = None, type: str | None = None):
     """
@@ -214,17 +213,24 @@ if __name__ == "__main__":
         required = False,
         help='Path to the stiffness file.'
     )
+    parser.add_argument(
+        '-s',     
+        '--save_stats',    
+        action='store_true',
+        help='Save computed statistics (mean parameters and stiffness) to files.')
     args = parser.parse_args()
     
-    # load lmps custom output file
+    #####################################################
+    # load lmps custom output file and extract poses
     custom_file = Path(args.custom_file)
     if not custom_file.exists():
         raise ValueError(f"Custom parameter file '{custom_file}' does not exist.")
-    
+     
     custom = LMPCustom(custom_file)
     poses = custom.poses(unwrap=True, reduced=False)
     
-    # load 
+    #####################################################
+    # load topology from database file
     basefn = custom_file.with_suffix('')
     dbfn = Path(args.database_file) if args.database_file is not None else None
     if dbfn is None:
@@ -235,9 +241,7 @@ if __name__ == "__main__":
         
     topol = CGRBPTopology.read_database(dbfn)
     
-    custom = LMPCustom(custom_file)
-    poses = custom.poses(unwrap=True, reduced=False)
-    
+    #####################################################
     # load reference stiffness and ground state
     if args.stiffness_file is not None:
         ref_stiffness_matrix = sp.sparse.load_npz(args.stiffness_file)
@@ -253,14 +257,13 @@ if __name__ == "__main__":
             ref_gs = rescale.rescale_groundstate(ref_gs)  
     else:
         ref_gs = topol.groundstate
-    marginal_stiff = marginalize_stiffness_matrix(ref_stiffness_matrix)
+    marginal_stiff = diagonal_marginals(ref_stiffness_matrix)
               
+    #####################################################
     # analysis ensemble
-    params = extract_se3_parameters(poses)
-    mean_params = np.mean(params, axis=0)
-    var_params = np.var(params, axis=0)
-    stiff_params = 1.0 / var_params   
-    
+    mean_params, stiff_params = eval_gs_and_stiffness(poses, topol, use_known_gs=False)
+
+    #####################################################
     # sanity checks
     if mean_params.shape != ref_gs.shape:
         raise ValueError(f"Mean parameters shape {mean_params.shape} does not match ground state shape {ref_gs.shape}.")
@@ -268,9 +271,13 @@ if __name__ == "__main__":
     if marginal_stiff.shape != stiff_params.shape:
         raise ValueError(f"Marginal stiffness shape {marginal_stiff.shape} does not match stiffness parameters shape {stiff_params.shape}.")
     
+    #####################################################
     # plot gs and mean params
     shape_fn = basefn.with_name(basefn.stem + '_shapes')
     stiff_fn = basefn.with_name(basefn.stem + '_stiff')
     plot_gs_and_mean_params(ref_gs, mean_params,savefig=shape_fn,type='gs')
     plot_gs_and_mean_params(marginal_stiff, stiff_params,savefig=stiff_fn,type='stiff')
     
+    if args.save_stats:
+        np.save(basefn.with_name(basefn.stem + '_params_means.npy'), mean_params)
+        np.save(basefn.with_name(basefn.stem + '_params_stiff.npy'), stiff_params)

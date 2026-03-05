@@ -3,12 +3,13 @@ from __future__ import annotations
 import sys, os
 import argparse
 import numpy as np
+import scipy as sp
 from pathlib import Path
 
 from .PolyCG.polycg import gen_params, load_sequence, write_seqfile
 # from .PolyCG.polycg import visualize_chimerax, visualize_pdb, visualize_xyz
 
-from .core.lmp_topol import CGRBPTopology
+from .core.topology import CGRBPTopology
 from .core.conf_builder import ConfBuilder
 from .core.matrix_methods import rescale_stiff
 # from .io.unit_conversion import RescaleUnits
@@ -206,15 +207,6 @@ if __name__ == "__main__":
         bond_fene_coeffs = np.array(args.bond_fene_coeffs, dtype=float)
         include_fene = True
     
-    if args.output_basename is not None:
-        outname = args.output_basename
-    else:
-        if args.sequence_file is not None:
-            outname = str(args.sequence_file).replace('.seq','')
-        else:
-            raise ValueError(f'No output name or sequence filename specified')
-    
-    
     ###################################################
     ########## Load sequence ##########################
     seq = args.sequence
@@ -252,9 +244,15 @@ if __name__ == "__main__":
     ###################################################
     ########## Determine output base filename #########
     if args.output_basename is None:
-        base_fn = Path(args.sequence_file)
+        if args.sequence_file is not None:
+            base_fn = str(args.sequence_file).replace('.seq','')
+            if args.composite_size > 0:
+                base_fn += f'_cg{args.composite_size}'
+        else:
+            raise ValueError(f'No output name or sequence filename specified')
     else:
-        base_fn = Path(args.output_basename)
+        base_fn = args.output_basename
+    base_fn = Path(base_fn)
 
     ###################################################
     ########## Select shape and stiffness matrices ####
@@ -313,7 +311,7 @@ if __name__ == "__main__":
         box = conf.extended_bounds(0.5,square_box=True)
     
         conf.write_datafile(
-            outname,
+            base_fn,
             topol,
             box = box,
             hybrid = False,
@@ -343,8 +341,6 @@ if __name__ == "__main__":
     if args.gen_xyz:
         conf.visualize_xyz(base_fn)
     
-    
-        
     # ##################################################
     # ########## Generate ChimeraX script ##############
     # if args.visualize_cgrbp:
@@ -371,16 +367,22 @@ if __name__ == "__main__":
     # if args.gen_xyz:
     #     visualize_xyz(base_fn, args.composite_size, poses=conf.poses, start_id=topol.center_pos)
     
-    # ##################################################
-    # ########## Save coefficients #####################
-    # if args.safe_coeffs:
-    #     if args.composite_size > 1:
-    #         params.save_cg_coeffs(base_fn.with_name(base_fn.stem + '_closed') if args.closed else base_fn)
-    #     else:
-    #         params.save_coeffs(base_fn.with_name(base_fn.stem + '_closed') if args.closed else base_fn)
-    
+    ##################################################
+    ########## Save coefficients #####################
+    if args.safe_coeffs:
+        resc_stiffmat = topol.get_stiffness_matrix()
+        resc_gs = topol.get_groundstate()
+
+        if sp.sparse.issparse(resc_stiffmat):
+            sp.sparse.save_npz(base_fn.with_name(base_fn.stem + '_stiff.npz'),resc_stiffmat)
+        else:
+            np.save(base_fn.with_name(base_fn.stem + '_stiff.npy'),resc_stiffmat)
+        np.save(base_fn.with_name(base_fn.stem + '_gs.npy'),resc_gs)
+
     ##################################################
     ########## Write sequence file ###################
     seqfn = base_fn.with_suffix('.seq')
     write_seqfile(seqfn,params.sequence,add_extension=True)
+
+
     
