@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence, Callable,  Tuple
+from typing import Any, Dict, Mapping, Sequence
 import atexit
 import os
 import signal
@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from ..SO3 import so3
 from ..evals.se3 import poses2junctions, junctions2parameters, junctions2dynamics
+from .console_output import print_progress
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,37 @@ class _ManagedMemmap(np.memmap):
         self._guard = getattr(obj, '_guard', None)
 
 
+def _available_memory_bytes() -> int:
+    """
+    Return the number of bytes of available (free + reclaimable) RAM.
+
+    Reads ``MemAvailable`` from ``/proc/meminfo`` (Linux).  Returns 0 if
+    the file cannot be read, which will always trigger the memmap path
+    (safe default).
+    """
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _read_box(box_type_str: str, f: Any) -> np.ndarray:
+    """Read 3 box-bound lines from *f* and return a flat (9,) array."""
+    rows = [list(map(float, f.readline().split())) for _ in range(3)]
+    box = np.zeros(9, dtype=float)
+    if "xy xz yz" in box_type_str:  # triclinic
+        for i, row in enumerate(rows):
+            box[i * 2], box[i * 2 + 1], box[6 + i] = row
+    else:                            # orthogonal
+        for i, row in enumerate(rows):
+            box[i * 2], box[i * 2 + 1] = row
+    return box
+
+
 def _scan_custom(filename: str):
     """
     Fast first-pass scan of a LAMMPS custom dump file.
@@ -127,75 +159,71 @@ def _scan_custom(filename: str):
     col_names : list[str]
     box_data : np.ndarray  shape (9,) – from the first timestep
     """
-    n_frames = 0
-    n_atoms = -1
-    n_cols = -1
-    col_names = None
-    box_data = None
-
     with open(filename, 'r') as f:
+        # ------------------------------------------------------------------ #
+        # Read the first frame to capture metadata                           #
+        # ------------------------------------------------------------------ #
+        if not f.readline():          # ITEM: TIMESTEP
+            return 0, 0, 0, [], None
+        f.readline()                  # timestep value
+
+        line = f.readline()           # ITEM: NUMBER OF ATOMS
+        if not line.startswith("ITEM: NUMBER OF ATOMS"):
+            raise ValueError(f"Expected 'ITEM: NUMBER OF ATOMS', but got: {line.strip()}")
+        n_atoms = int(f.readline())
+
+        line = f.readline()           # ITEM: BOX BOUNDS
+        if not line.startswith("ITEM: BOX BOUNDS"):
+            raise ValueError(f"Expected 'ITEM: BOX BOUNDS', but got: {line.strip()}")
+        box_data = _read_box(line.strip().split(' ', 3)[3], f)
+
+        line = f.readline()           # ITEM: ATOMS
+        if not line.startswith("ITEM: ATOMS"):
+            raise ValueError(f"Expected 'ITEM: ATOMS', but got: {line.strip()}")
+        col_names = line.strip().split()[2:]
+        n_cols = len(col_names)
+
+        for _ in range(n_atoms):      # skip atom data
+            f.readline()
+
+        n_frames = 1
+
+        # ------------------------------------------------------------------ #
+        # Remaining frames – validate consistency, skip atom data            #
+        # ------------------------------------------------------------------ #
         while True:
-            # ITEM: TIMESTEP
-            line = f.readline()
+            line = f.readline()       # ITEM: TIMESTEP
             if not line:
                 break
             if not line.startswith("ITEM: TIMESTEP"):
                 raise ValueError(f"Expected 'ITEM: TIMESTEP', but got: {line.strip()}")
-            f.readline()  # timestep value
+            f.readline()              # timestep value
 
-            # ITEM: NUMBER OF ATOMS
-            line = f.readline()
+            line = f.readline()       # ITEM: NUMBER OF ATOMS
             if not line.startswith("ITEM: NUMBER OF ATOMS"):
                 raise ValueError(f"Expected 'ITEM: NUMBER OF ATOMS', but got: {line.strip()}")
-            cur_atoms = int(f.readline().strip())
+            cur_atoms = int(f.readline())
+            if cur_atoms != n_atoms:
+                raise ValueError(
+                    f"Number of atoms changed from {n_atoms} to {cur_atoms} at frame {n_frames}."
+                )
 
-            # ITEM: BOX BOUNDS
-            line = f.readline()
+            line = f.readline()       # ITEM: BOX BOUNDS (3 data lines)
             if not line.startswith("ITEM: BOX BOUNDS"):
                 raise ValueError(f"Expected 'ITEM: BOX BOUNDS', but got: {line.strip()}")
-            box_type_str = line.strip().split(' ', 3)[3]
-            x_line = list(map(float, f.readline().strip().split()))
-            y_line = list(map(float, f.readline().strip().split()))
-            z_line = list(map(float, f.readline().strip().split()))
+            f.readline(); f.readline(); f.readline()
 
-            # ITEM: ATOMS
-            line = f.readline()
+            line = f.readline()       # ITEM: ATOMS
             if not line.startswith("ITEM: ATOMS"):
                 raise ValueError(f"Expected 'ITEM: ATOMS', but got: {line.strip()}")
-            cur_cols = line.strip().split(' ')[2:]
+            cur_cols = line.strip().split()[2:]
+            if cur_cols != col_names:
+                raise ValueError(f"Column layout changed at frame {n_frames}.")
 
-            if n_frames == 0:
-                n_atoms = cur_atoms
-                n_cols = len(cur_cols)
-                col_names = cur_cols
-                cur_box = np.zeros(9, dtype=float)
-                if "xy xz yz" in box_type_str:
-                    cur_box[0], cur_box[1], cur_box[6] = x_line
-                    cur_box[2], cur_box[3], cur_box[7] = y_line
-                    cur_box[4], cur_box[5], cur_box[8] = z_line
-                else:
-                    cur_box[0], cur_box[1] = x_line
-                    cur_box[2], cur_box[3] = y_line
-                    cur_box[4], cur_box[5] = z_line
-                box_data = cur_box
-            else:
-                if cur_atoms != n_atoms:
-                    raise ValueError(
-                        f"Number of atoms changed from {n_atoms} to {cur_atoms} at frame {n_frames}."
-                    )
-                if len(cur_cols) != n_cols or cur_cols != col_names:
-                    raise ValueError(
-                        f"Column layout changed at frame {n_frames}."
-                    )
-
-            # Skip atom data lines – O(1) memory per frame
-            for _ in range(cur_atoms):
+            for _ in range(n_atoms):  # skip atom data
                 f.readline()
 
             n_frames += 1
-
-            if n_frames % 10000 == 0:
-                print(f"Scanned {n_frames} frames...", file=sys.stderr)
 
     return n_frames, n_atoms, n_cols, col_names, box_data
 
@@ -205,6 +233,7 @@ def parse_custom(
     start: int = 0,
     last: int = -1,
     stride: int = 1,
+    verbose: bool = False,
 ) -> Dict:
     """
     Parses a LAMMPS custom dump file and returns data in a dictionary format.
@@ -238,12 +267,17 @@ def parse_custom(
 
     Temp file
     ---------
-    The backing file is placed next to the input file and is named
+    If the required array would exceed **1/4 of available RAM**, the data are
+    stored in a disk-backed ``_ManagedMemmap``; otherwise a plain pre-allocated
+    ``np.ndarray`` is used and no file is written.
+
+    When a temp file is created it is placed next to the input file and named
     ``<stem>.custom_read_tmp``.  It is deleted automatically when:
 
-    * the returned ``data['data']`` memmap is garbage-collected — a
-        ``_FileCleanupGuard`` stored in the returned dict calls ``os.unlink``
-        from its ``__del__`` method when the last reference is dropped;
+    * the returned ``data['data']`` array is garbage-collected — a
+        ``_FileCleanupGuard`` embedded in the ``_ManagedMemmap`` calls
+        ``os.unlink`` from its ``__del__`` method when the last reference
+        is dropped;
     * the Python interpreter exits normally (``atexit`` handler);
     * the process receives ``SIGTERM`` (server shutdown, ``kill``, etc.);
     * the user presses Ctrl-C (``SIGINT`` → ``KeyboardInterrupt`` → ``atexit``).
@@ -267,11 +301,14 @@ def parse_custom(
               - 'args' (list): A list of strings with the names of the dumped
                 attributes (e.g., ['id', 'type', 'mol', 'x', 'y', 'z',
                 'ix', 'iy', 'iz']).
-              - 'data' (np.memmap): A 3D NumPy memmap array of shape
+              - 'data' (np.ndarray | np.memmap): A 3D array of shape
                 (N_sel, A, C), where N_sel = number of selected snapshots,
                 A = number of atoms per snapshot, C = number of columns.
+                A plain ``np.ndarray`` is used when the data fits in 1/4 of
+                available RAM; a disk-backed ``_ManagedMemmap`` is used
+                otherwise.
               - '_memmap_path' (str): Path of the backing ``.custom_read_tmp``
-                file (visible on disk while the data is in use).
+                file.  Present only when a memmap was used.
 
     Raises:
         FileNotFoundError: If the specified filename does not exist.
@@ -289,6 +326,8 @@ def parse_custom(
         # ------------------------------------------------------------------ #
         # Pass 1 – fast metadata scan (no atom data held in RAM)             #
         # ------------------------------------------------------------------ #
+        if verbose:
+            print("Scanning file for metadata and frame count...")
         n_frames, n_atoms, n_cols, col_names, box_raw = _scan_custom(filename)
 
         if n_frames == 0:
@@ -304,8 +343,8 @@ def parse_custom(
         # ------------------------------------------------------------------ #
         effective_last = (n_frames - 1) if (last < 0 or last >= n_frames) else last
         # Selected 0-based frame indices (ordered)
-        selected_indices: list[int] = list(range(start, effective_last + 1, stride))
-        n_selected = len(selected_indices)
+        selected_range = range(start, effective_last + 1, stride)
+        n_selected = len(selected_range)
 
         if n_selected == 0:
             return {
@@ -315,77 +354,71 @@ def parse_custom(
                 'data': np.array([]).reshape(0, 0, 0),
             }
 
-        selected_set: set[int] = set(selected_indices)
-
         # ------------------------------------------------------------------ #
         # Allocate output arrays                                             #
         # ------------------------------------------------------------------ #
         timesteps_array = np.empty(n_selected, dtype=np.int64)
 
-        # Use a memmap so the (N_sel, A, C) data lives on disk, not in RAM.
-        # Place the backing file next to the input file so it is visible and
-        # easy to identify.  A _FileCleanupGuard stored in the returned dict
-        # deletes it via __del__ when the data is no longer referenced;
-        # the atexit / SIGTERM handlers act as a backstop.
-        tmp_path = str(
-            Path(filename).parent / (Path(filename).stem + '.custom_read_tmp')
-        )
-        data_matrix = np.memmap(
-            tmp_path, dtype=np.float64, mode='w+',
-            shape=(n_selected, n_atoms, n_cols),
-        )
-        _active_tmp_files.add(tmp_path)
-        guard = _FileCleanupGuard(tmp_path)
-        data_matrix = _ManagedMemmap(
-            tmp_path, dtype=np.float64, mode='w+',
-            shape=(n_selected, n_atoms, n_cols),
-            guard=guard,
-        )
-        raw_idx = 0    # position in the file (0-based snapshot counter)
-        out_idx = 0    # position in the output array
+        # Decide between in-RAM pre-allocation and a disk-backed memmap.
+        # Use memmap when the required array would exceed 1/4 of the
+        # currently available RAM; use np.empty otherwise.
+        required_bytes = n_selected * n_atoms * n_cols * np.dtype(np.float64).itemsize
+        use_memmap = required_bytes > _available_memory_bytes() // 4
+
+        tmp_path: str | None = None
+        if use_memmap:
+            tmp_path = str(
+                Path(filename).parent / (Path(filename).stem + '.custom_read_tmp')
+            )
+            _active_tmp_files.add(tmp_path)
+            guard = _FileCleanupGuard(tmp_path)
+            data_matrix: np.ndarray = _ManagedMemmap(
+                tmp_path, dtype=np.float64, mode='w+',
+                shape=(n_selected, n_atoms, n_cols),
+                guard=guard,
+            )
+        else:
+            data_matrix = np.empty((n_selected, n_atoms, n_cols), dtype=np.float64)
+
+        # ------------------------------------------------------------------ #
+        # Pass 2 – fill data_matrix, skipping unselected frames             #
+        # Use an iterator over the selected range – O(1) auxiliary memory.  #
+        # ------------------------------------------------------------------ #
+        sel_iter = iter(selected_range)
+        next_sel: int | None = next(sel_iter, None)
+        out_idx = 0
 
         with open(filename, 'r') as f:
-            while raw_idx <= effective_last:
+            for raw_idx in range(effective_last + 1):
                 # ITEM: TIMESTEP
                 line = f.readline()
                 if not line:
                     break
                 if not line.startswith("ITEM: TIMESTEP"):
                     raise ValueError(f"Expected 'ITEM: TIMESTEP', but got: {line.strip()}")
-                ts_value = int(f.readline().strip())
+                ts_value = int(f.readline())
 
-                # ITEM: NUMBER OF ATOMS
-                f.readline()
-                f.readline()  # num_atoms (already validated in pass 1)
+                # Skip: ITEM: NUMBER OF ATOMS, n_atoms,
+                #        ITEM: BOX BOUNDS, 3 box lines,
+                #        ITEM: ATOMS header  → 7 lines total
+                for _ in range(7):
+                    f.readline()
 
-                # ITEM: BOX BOUNDS  (header + 3 data lines)
-                f.readline()
-                f.readline()
-                f.readline()
-                f.readline()
-
-                # ITEM: ATOMS
-                f.readline()  # column-name header
-
-                if raw_idx in selected_set:
-                    # Store this frame
+                if raw_idx == next_sel:
                     timesteps_array[out_idx] = ts_value
-                    frame_view = data_matrix[out_idx]  # shape (n_atoms, n_cols)
+                    frame_view = data_matrix[out_idx]
                     for i in range(n_atoms):
                         atom_line_str = f.readline()
                         if not atom_line_str:
                             raise ValueError("Unexpected end of file while reading atom data.")
                         frame_view[i] = atom_line_str.split()
                     out_idx += 1
-
-                    if out_idx % 10000 == 0:
-                        print(f"Read {out_idx}/{n_selected} selected frames...", file=sys.stderr)
+                    if verbose and (out_idx % max(1, n_selected // 500) == 0 or out_idx == n_selected):
+                        print_progress(out_idx, n_selected, prefix='Reading frames')
+                    next_sel = next(sel_iter, None)
                 else:
-                    # Skip atom data for this frame
                     for _ in range(n_atoms):
                         f.readline()
-
-                raw_idx += 1
 
     except FileNotFoundError:
         raise FileNotFoundError(f"Error: File not found at {filename}") from None
@@ -393,17 +426,19 @@ def parse_custom(
         raise RuntimeError(f"An error occurred while parsing the dump file: {e}") from e
 
     box = np.zeros((3, 3))
-    box[:, 0] = box_raw[:6][0::2]
-    box[:, 1] = box_raw[:6][1::2]
+    box[:, 0] = box_raw[0:6:2]
+    box[:, 1] = box_raw[1:6:2]
     box[:, 2] = box_raw[6:]
 
-    return {
+    result: Dict[str, Any] = {
         'box': box,
         'timesteps': timesteps_array,
         'args': col_names,
         'data': data_matrix,
-        '_memmap_path': tmp_path,
     }
+    if tmp_path is not None:
+        result['_memmap_path'] = tmp_path
+    return result
 
 
 def parse_custom_old(filename: str) -> Dict:
@@ -603,6 +638,7 @@ class LoadCustom:
     start: int = 0
     last: int = -1
     stride: int = 1
+    verbose: bool = False
 
     box: np.ndarray = field(init=False)
     timesteps: np.ndarray = field(init=False)
@@ -612,7 +648,7 @@ class LoadCustom:
 
     def __post_init__(self) -> None:
         datadict = parse_custom(
-            self.filename, start=self.start, last=self.last, stride=self.stride
+            self.filename, start=self.start, last=self.last, stride=self.stride, verbose=self.verbose
         )
         self.box = datadict['box']
         self.timesteps = datadict['timesteps']
