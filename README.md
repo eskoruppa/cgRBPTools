@@ -538,9 +538,9 @@ dump DUMPID DUMP_GROUP custom DUMP_FREQ OUTNAME id mol x y z ix iy iz c_quat[1] 
 ### Loading Dump Files
 
 ```python
-from cgrbptools.io.parse_custom import LMPCustom
+from cgrbptools.io.parse_custom import LoadCustom
 
-custom = LMPCustom('trajectory.custom')
+custom = LoadCustom('trajectory.custom')
 
 # Get unwrapped poses (SE3 matrices)
 poses = custom.poses(unwrap=True, reduced=False)  # Shape: (nframes, natoms, 4, 4)

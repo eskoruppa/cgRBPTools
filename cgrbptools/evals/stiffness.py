@@ -4,11 +4,86 @@ import numpy as np
 import scipy as sp
 from numpy.linalg import slogdet, solve
 from scipy.linalg import cho_factor, cho_solve
+from scipy.stats import pearsonr
 from .se3 import poses2junctions, junctions2parameters, junctions2dynamics 
 from ..core.topology import CGRBPTopology
 
 
+def dynamicparams2stiffness(
+    dynamic_params: np.ndarray,
+    subtract_mean: bool = False,
+    chunk_size: int | None = None,
+) -> np.ndarray:
+    """
+    Compute the stiffness matrix from dynamic parameters by calculating the
+    covariance and inverting it.
+
+    Parameters
+    ----------
+    dynamic_params : (NSteps, nbps, 6) or (NSteps, nbps*6) ndarray
+        The dynamic parameters (e.g., junction parameters) for each sample.
+        A 3-D array of shape ``(NSteps, nbps, 6)`` is automatically reshaped
+        to ``(NSteps, nbps*6)`` before the covariance is computed.
+    subtract_mean : bool, optional
+        Whether to subtract the mean from the dynamic parameters before
+        computing the covariance. Default is False.
+    chunk_size : int or None, optional
+        If given, the covariance accumulation is performed in chunks of this
+        many frames.  Use this when ``NSteps`` is so large that holding the
+        full ``(NSteps, nbps*6)`` array in memory is acceptable but the BLAS
+        kernel's temporary workspace is not.  If ``None`` (default), the
+        entire array is passed to a single BLAS ``dsyrk`` call via
+        ``X.T @ X``, which is already memory-optimal for ordinary use.
+
+    Returns
+    -------
+    stiffmat : (nbps*6, nbps*6) ndarray
+        The stiffness (inverse covariance) matrix.
+    """
+    if dynamic_params.ndim == 3:
+        nsteps = dynamic_params.shape[0]
+        dynamic_params = dynamic_params.reshape(nsteps, -1)
+
+    nsteps, n_features = dynamic_params.shape
+
+    if subtract_mean:
+        dynamic_params = dynamic_params - dynamic_params.mean(axis=0)
+
+    # Accumulate X^T X in chunks to bound peak extra memory to
+    # O(chunk_size * n_features) rather than the full array size.
+    if chunk_size is not None:
+        cov = np.zeros((n_features, n_features), dtype=dynamic_params.dtype)
+        for start in range(0, nsteps, chunk_size):
+            chunk = dynamic_params[start : start + chunk_size]
+            cov += chunk.T @ chunk
+        cov /= nsteps
+    else:
+        # Single BLAS dsyrk call — O(n_features^2) extra memory.
+        cov = (dynamic_params.T @ dynamic_params) / nsteps
+
+    stiffmat = np.linalg.inv(cov)
+    return stiffmat
+
 def eval_gs_and_stiffness(poses: np.ndarray, topol: CGRBPTopology, use_known_gs: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    junctions = poses2junctions(poses)
+    params = junctions2parameters(junctions)
+    mean_params = np.mean(params, axis=0)
+
+    if use_known_gs:
+        gs = topol.get_groundstate()
+    else:
+        gs = mean_params
+
+    if topol.subtract_groundstate:
+        dynamic_params = params - gs
+    else:
+        dynamic_junctions = junctions2dynamics(junctions, static_params=gs)
+        dynamic_params = junctions2parameters(dynamic_junctions)
+
+    stiffmat = dynamicparams2stiffness(dynamic_params)
+    return mean_params, stiffmat
+
+def eval_gs_and_diagonal_stiffness(poses: np.ndarray, topol: CGRBPTopology, use_known_gs: bool = False) -> tuple[np.ndarray, np.ndarray]:
     junctions = poses2junctions(poses)
     params = junctions2parameters(junctions)
     mean_params = np.mean(params, axis=0)
@@ -105,7 +180,7 @@ def diagonal_marginals(stiffmat: np.ndarray | sp.sparse.spmatrix, n_neighbors: i
 
 
 
-def kullbackleibler_divergence(K1, K2):
+def kullbackleibler_divergence_2(K1, K2, normalized: bool = False):
     """
     Compute Kullback–Leibler divergence between two stiffness matrices K1 and K2,
     interpreted as inverse covariance matrices of zero-mean Gaussians.
@@ -145,10 +220,12 @@ def kullbackleibler_divergence(K1, K2):
     logdet_ratio = logdet2 - logdet1
 
     kl = 0.5 * (trace_term - n + logdet_ratio)
+    if normalized:
+        kl /= n
     return kl
 
 
-def kullbackleibler_divergence_(K1, K2, mu1=None, mu2=None):
+def kullbackleibler_divergence(K1, K2, mu1=None, mu2=None, normalize: bool = False):
     """Kullback-Leibler divergence D_KL(p1 || p2) for two multivariate
     Gaussians parameterised by their stiffness (precision) matrices.
 
@@ -164,7 +241,8 @@ def kullbackleibler_divergence_(K1, K2, mu1=None, mu2=None):
     Returns
     -------
     float
-        D_KL(p1 || p2)  (in nats).
+        D_KL(p1 || p2)  (in nats). Returns nan if either matrix is not
+        positive definite.
 
     Notes
     -----
@@ -188,9 +266,12 @@ def kullbackleibler_divergence_(K1, K2, mu1=None, mu2=None):
 
     d = K1.shape[0]
 
-    # Cholesky factorisations  K = L Lᵀ
-    L1, low1 = cho_factor(K1)
-    L2, low2 = cho_factor(K2)
+    try:
+        # Cholesky factorisations  K = L Lᵀ
+        L1, low1 = cho_factor(K1)
+        L2, low2 = cho_factor(K2)
+    except np.linalg.LinAlgError:
+        return np.nan
 
     # log-determinants via Cholesky diagonal
     logdet_K1 = 2.0 * np.sum(np.log(np.diag(L1)))
@@ -207,4 +288,72 @@ def kullbackleibler_divergence_(K1, K2, mu1=None, mu2=None):
     else:
         mahal = 0.0
 
-    return 0.5 * (trace_term - d + logdet_K1 - logdet_K2 + mahal)
+    kl = 0.5 * (trace_term - d + logdet_K1 - logdet_K2 + mahal)
+    if normalize:
+        kl /= d
+    return kl
+
+
+def frobenius_difference(K_target, K_MD, normalize=False):
+    """
+    Compute the Frobenius norm of the difference between two matrices.
+
+    Parameters
+    ----------
+    K_target : (n, n) ndarray
+        Reference stiffness matrix.
+    K_MD : (n, n) ndarray
+        Stiffness matrix obtained from simulation.
+    normalize : bool, default False
+        If True, normalize the Frobenius norm by the norm of K_target.
+
+    Returns
+    -------
+    float
+        Frobenius norm (optionally normalized).
+    """
+    K_target = np.asarray(K_target)
+    K_MD = np.asarray(K_MD)
+
+    if K_target.shape != K_MD.shape:
+        raise ValueError("K_target and K_MD must have the same shape")
+
+    frob_diff = np.linalg.norm(K_MD - K_target, 'fro')
+
+    if normalize:
+        frob_norm = np.linalg.norm(K_target, 'fro')
+        return frob_diff / frob_norm
+    else:
+        return frob_diff
+
+
+def pearson_matrix_correlation(K_target, K_MD, normalize=False):
+    """
+    Compute the Pearson correlation coefficient between two matrices
+    by flattening them into vectors.
+
+    Parameters
+    ----------
+    K_target : (n, n) ndarray
+        Reference stiffness matrix.
+    K_MD : (n, n) ndarray
+        Stiffness matrix obtained from simulation.
+    normalize : bool, default False
+        Included for API consistency, not used internally.
+
+    Returns
+    -------
+    float
+        Pearson correlation coefficient (-1 to 1).
+    """
+    K_target = np.asarray(K_target)
+    K_MD = np.asarray(K_MD)
+
+    if K_target.shape != K_MD.shape:
+        raise ValueError("K_target and K_MD must have the same shape")
+
+    vec_target = K_target.flatten()
+    vec_MD = K_MD.flatten()
+
+    r, _ = pearsonr(vec_target, vec_MD)
+    return r

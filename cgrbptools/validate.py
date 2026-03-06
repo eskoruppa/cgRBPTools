@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 
 from .core.topology import CGRBPTopology
 from .core.unit_conversion import RescaleUnits
-from .io.parse_custom import LMPCustom
+from .io.parse_custom import LoadCustom
 
-from .evals.stiffness import diagonal_marginals, eval_gs_and_stiffness
+from .evals.stiffness import diagonal_marginals, eval_gs_and_diagonal_stiffness
 
 
 def cm_to_inch(cm):
@@ -226,7 +226,7 @@ if __name__ == "__main__":
     if not custom_file.exists():
         raise ValueError(f"Custom parameter file '{custom_file}' does not exist.")
      
-    custom = LMPCustom(custom_file)
+    custom = LoadCustom(custom_file)
     poses = custom.poses(unwrap=True, reduced=False)
     
     #####################################################
@@ -261,7 +261,7 @@ if __name__ == "__main__":
               
     #####################################################
     # analysis ensemble
-    mean_params, stiff_params = eval_gs_and_stiffness(poses, topol, use_known_gs=False)
+    mean_params, stiff_params = eval_gs_and_diagonal_stiffness(poses, topol, use_known_gs=False)
 
     #####################################################
     # sanity checks

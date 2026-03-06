@@ -64,13 +64,13 @@ def eval_stiffmat(Xd: np.ndarray):
 
 if __name__ == "__main__":
     
-    from .parse_custom import LMPCustom
+    from .parse_custom import LoadCustom
     np.set_printoptions(precision=2, suppress=True,linewidth=200)
     
     
     
     fn = sys.argv[1]
-    lmp = LMPCustom(fn)
+    lmp = LoadCustom(fn)
     taus = lmp.se3(unwrap=True)
     
     Xs = se3_coords_mean(taus)

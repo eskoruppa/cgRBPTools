@@ -296,10 +296,10 @@ def rotmat2euler(R: np.ndarray) -> np.ndarray:
 
 if __name__ == "__main__":
     
-    from .parse_custom import LMPCustom
+    from .parse_custom import LoadCustom
     
     fn = sys.argv[1]
-    lmp = LMPCustom(fn)
+    lmp = LoadCustom(fn)
     taus = lmp.se3(unwrap=True)
     
     # X = se3_mats2coords(taus)

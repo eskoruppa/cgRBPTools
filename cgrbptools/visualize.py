@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .core.topology import CGRBPTopology
 from .core.conf_builder import ConfBuilder
-from .io.parse_custom import LMPCustom
+from .io.parse_custom import LoadCustom
 
 ###################################################################################################
 ###################################################################################################
@@ -64,7 +64,7 @@ if __name__ == "__main__":
             raise ValueError(f"Database file '{dbfn}' does not exist. Please provide a valid database file using the '-db' argument.")
      
     topol = CGRBPTopology.read_database(dbfn)
-    custom = LMPCustom(custom_file)
+    custom = LoadCustom(custom_file)
     poses = custom.poses(unwrap=True, reduced=False)
     
     if not args.all:
