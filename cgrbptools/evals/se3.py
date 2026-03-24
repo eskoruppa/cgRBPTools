@@ -5,8 +5,8 @@ import numpy as np
 from ..SO3 import so3
 
 # Direct imports needed for numba JIT-to-JIT calls in the _optimized variants
-from ..SO3.so3.SE3 import se3_inverse as _se3_inverse
-from ..SO3.so3.Euler import se3_rotmat2euler as _se3_rotmat2euler
+from ..SO3.so3.SE3 import _se3_inverse_sv as _se3_inverse
+from ..SO3.so3.Euler import _se3_rotmat2euler_sv as _se3_rotmat2euler
 from ..SO3.so3.pyConDec.pycondec import cond_jit
 
 # Numerical constants (mirrored from SO3/so3/Euler.py)

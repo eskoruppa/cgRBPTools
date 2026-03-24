@@ -687,7 +687,8 @@ class LoadCustom:
         - else raise (no fallback to wrapped coords)
 
         unwrap=False:
-        - require x/y/z
+        - prefer x/y/z
+        - else if xu/yu/zu and box are present, wrap back via modulo
         - else raise
         """
         has_xyz = all(k in self.arg2id for k in ("x", "y", "z"))
@@ -715,7 +716,15 @@ class LoadCustom:
 
         if has_xyz:
             return self.select(("x", "y", "z"))
-        raise ValueError('unwrap=False requires wrapped coordinates (x,y,z), but they are not present.')
+        if has_xu and self.box is not None and self.box.size > 0:
+            xu = self.select(("xu", "yu", "zu"))
+            lo = self.box[:, 0]
+            L = self.box[:, 1] - lo
+            return (xu - lo) % L + lo
+        raise ValueError(
+            'unwrap=False requires wrapped coordinates (x,y,z). '
+            'Neither (x,y,z) nor (xu,yu,zu) with box dimensions are present.'
+        )
 
     def pos(self, unwrap: bool = True) -> np.ndarray:
         return self.get_positions(unwrap=unwrap)

@@ -23,3 +23,6 @@ Repository = "https://github.com/eskoruppa/cgRBPTools"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cgrbptools*"]
+
+[tool.setuptools.package-data]
+"cgrbptools.PolyCG.polycg.IOPolyMC.iopolymc" = ["database/**/*"]
