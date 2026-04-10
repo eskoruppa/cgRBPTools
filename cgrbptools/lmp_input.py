@@ -77,7 +77,7 @@ if __name__ == "__main__":
         '-dec',     
         '--decimals',           
         type=int, default = 4,
-        help='Number of decimal places for output formatting (default: 2)')
+        help='Number of decimal places for output formatting (default: 4)')
     parser.add_argument(
         '-mass',    
         '--mass',           
@@ -191,7 +191,14 @@ if __name__ == "__main__":
             "Mode selection. Allowed values: "
             + ", ".join(sorted(ConfBuilder.mapping_dict().keys()))
             + ". Defaults to None."
-        ),)
+        ),
+        )
+    parser.add_argument(
+        '-dlk', 
+        '--excess_link', 
+        type=float, 
+        default = 0.0,
+        help='Set excess linking number for configuration generation. (default: 0.0)') 
     args = parser.parse_args()
     
     ##################################################################################################################
@@ -307,7 +314,7 @@ if __name__ == "__main__":
     if gen_conf:
         conf_method_key = args.configuration_method
         print(f"Generating configuration using method: {ConfBuilder.mapping_dict()[conf_method_key]} (input: {conf_method_key})")
-        conf = ConfBuilder.build(topol, conf_method_key, mass=args.mass)
+        conf = ConfBuilder.build(topol, conf_method_key, mass=args.mass, excess_link=args.excess_link)
         box = conf.extended_bounds(0.5,square_box=True)
     
         conf.write_datafile(
@@ -324,7 +331,7 @@ if __name__ == "__main__":
     ##################################################
     ########## Visualizations ########################
     if conf is None:   
-        conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass)
+        conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
     
     ##################################################
     ########## Generate ChimeraX script ##############    
@@ -345,7 +352,7 @@ if __name__ == "__main__":
     # ########## Generate ChimeraX script ##############
     # if args.visualize_cgrbp:
     #     if conf is None:
-    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass)
+    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
     
     #     if args.composite_size > 1:
     #         bead_radius = args.composite_size*0.34*0.5
@@ -359,7 +366,7 @@ if __name__ == "__main__":
     # ########## Generate PDB ##########################
     # if args.gen_pdb and not args.visualize_cgrbp:
     #     if conf is None:
-    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass)
+    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
     #     visualize_pdb(base_fn, seq, poses=conf.poses_in_nm)
      
     # ##################################################

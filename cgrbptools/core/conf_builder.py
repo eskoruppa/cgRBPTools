@@ -46,6 +46,7 @@ class ConfBuilder:
         conf_type: str,
         mass: float = 1,
         verbose = False,
+        excess_link: float = 0.0,
     ) -> CGRBPConf:
         """
         Build a CGRBPConf of the specified type using the stored topology.
@@ -79,6 +80,9 @@ class ConfBuilder:
         method = getattr(cls, method_name)
         if verbose:
             print(f"Generating configuration using method: {method_name}.")
+        
+        if method_name in ["straight", "circular"]:
+            return method(topology, excess_link=excess_link, mass=mass)
         return method(topology, mass=mass)
         
 
@@ -87,27 +91,27 @@ class ConfBuilder:
     def straight(
         cls,
         topology: CGRBPTopology,
-        excess_twist: float = 0,
+        excess_link: float = 0,
         mass: float = 1,
         orientation: np.ndarray | list | tuple = np.array([0.0, 0., 1.]),
         origin: np.ndarray | list | tuple = np.zeros(3),
     ) -> CGRBPConf:
         """
-        Generate a straight DNA configuration with optional excess twist.
+        Generate a straight DNA configuration with optional excess link.
         
         Constructs a linear chain of rigid base pairs starting from the origin
         with the specified orientation. The configuration is built by applying
         successive SE3 transformations from the topology's groundstate, with
-        optional additional twist.
+        optional additional link.
         
         Parameters
         ----------
         topology : CGRBPTopology
             Topology object containing groundstate parameters and stiffness.
             Must have groundstate initialized via set_params().
-        excess_twist : float, optional
-            Total excess twist in radians to distribute uniformly across all steps.
-            Default is 0 (no excess twist).
+        excess_link : float, optional
+            Total excess link to distribute uniformly across all steps.
+            Default is 0 (no excess link).
         mass : float, optional
             Mass of each base pair. Must be positive. Default is 1.
         orientation : array-like of shape (3,), optional
@@ -175,7 +179,7 @@ class ConfBuilder:
         # For closed chains, the last groundstate entry connects back to the first element
         # so we exclude it from the forward chain construction
         num_steps = topology.nbps - 1 if topology.closed else topology.nbps
-        excess_twist_per_step = excess_twist / topology.nbps
+        excess_twist_per_step = 2*np.pi * excess_link / topology.nbps
         for i in range(num_steps):
             X0 = topology.groundstate[i]
             Xstr = np.zeros(X0.shape)

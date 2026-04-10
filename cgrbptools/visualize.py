@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys, os
 import argparse
+import numpy as np
 from pathlib import Path
 
 from .core.topology import CGRBPTopology
@@ -73,8 +74,26 @@ if __name__ == "__main__":
         conf = ConfBuilder.from_poses(poses[args.snapshot],topol)
         conf.visualize_chimerax(basefn, include_bps_triads=True)
     else:
+        # for i in range(0,len(poses),args.stride):
+        #     print(f'Visualizing snapshot {i} / {len(poses)}')
+        #     conf = ConfBuilder.from_poses(poses[i],topol)
+        #     snapfn = basefn.with_name(basefn.stem + f'_snapshots')
+        #     conf.visualize_chimerax(snapfn / f'snapshot_{i:04d}', include_bps_triads=True)
+        from .core.backmap import dna_backmap
+        from .PolyCG.polycg.IOPolyMC import iopolymc as iopmc
+
+        snaps = []
         for i in range(0,len(poses),args.stride):
-            print(f'Visualizing snapshot {i} / {len(poses)}')
+            print(i)            
             conf = ConfBuilder.from_poses(poses[i],topol)
-            snapfn = basefn.with_name(basefn.stem + f'_snapshots')
-            conf.visualize_chimerax(snapfn / f'snapshot_{i:04d}', include_bps_triads=True)
+
+            bp_poses = dna_backmap(conf,verbose=False)
+            snaps.append(bp_poses)
+
+            # if i > 1600:
+            #     break
+        
+        snaps = np.array(snaps)
+        iopmc.gen_cif_trajectory(str(basefn)+'.cif', snaps[:,:,:3,3], snaps[:,:,:3,:3], sequence=topol.sequence)
+
+        

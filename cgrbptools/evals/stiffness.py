@@ -180,7 +180,7 @@ def diagonal_marginals(stiffmat: np.ndarray | sp.sparse.spmatrix, n_neighbors: i
 
 
 
-def kullbackleibler_divergence_2(K1, K2, normalized: bool = False):
+def kullbackleibler_divergence_2(K1, K2, normalized: bool = False, symmetrize: bool = True):
     """
     Compute Kullback–Leibler divergence between two stiffness matrices K1 and K2,
     interpreted as inverse covariance matrices of zero-mean Gaussians.
@@ -191,6 +191,11 @@ def kullbackleibler_divergence_2(K1, K2, normalized: bool = False):
     ----------
     K1, K2 : (n, n) ndarray
         Symmetric positive definite stiffness matrices.
+    normalized : bool, optional
+        If True, divide the result by n. Default is False.
+    symmetrize : bool, optional
+        If True, return the symmetrized KL divergence
+        0.5 * (D_KL(p1||p2) + D_KL(p2||p1)). Default is True.
 
     Returns
     -------
@@ -220,12 +225,19 @@ def kullbackleibler_divergence_2(K1, K2, normalized: bool = False):
     logdet_ratio = logdet2 - logdet1
 
     kl = 0.5 * (trace_term - n + logdet_ratio)
+
+    if symmetrize:
+        A_rev = solve(K1, K2)
+        trace_term_rev = np.trace(A_rev)
+        kl_rev = 0.5 * (trace_term_rev - n - logdet_ratio)
+        kl = 0.5 * (kl + kl_rev)
+
     if normalized:
         kl /= n
     return kl
 
 
-def kullbackleibler_divergence(K1, K2, mu1=None, mu2=None, normalize: bool = False):
+def kullbackleibler_divergence(K1, K2, mu1=None, mu2=None, normalize: bool = False, symmetrize: bool = True):
     """Kullback-Leibler divergence D_KL(p1 || p2) for two multivariate
     Gaussians parameterised by their stiffness (precision) matrices.
 
@@ -237,12 +249,17 @@ def kullbackleibler_divergence(K1, K2, mu1=None, mu2=None, normalize: bool = Fal
     mu1, mu2 : (d,) array_like, optional
         Mean vectors.  If omitted, equal means are assumed and the
         Mahalanobis term vanishes.
+    normalize : bool, optional
+        If True, divide the result by d. Default is False.
+    symmetrize : bool, optional
+        If True, return the symmetrized KL divergence
+        0.5 * (D_KL(p1||p2) + D_KL(p2||p1)). Default is True.
 
     Returns
     -------
     float
-        D_KL(p1 || p2)  (in nats). Returns nan if either matrix is not
-        positive definite.
+        D_KL(p1 || p2) or the symmetrized version (in nats). Returns nan
+        if either matrix is not positive definite.
 
     Notes
     -----
@@ -289,6 +306,15 @@ def kullbackleibler_divergence(K1, K2, mu1=None, mu2=None, normalize: bool = Fal
         mahal = 0.0
 
     kl = 0.5 * (trace_term - d + logdet_K1 - logdet_K2 + mahal)
+
+    if symmetrize:
+        # D_KL(p2||p1): swap roles of K1/K2 and mu1/mu2
+        K2inv_K1 = cho_solve((L2, low2), K1)
+        trace_term_rev = np.trace(K2inv_K1)
+        mahal_rev = dmu @ K1 @ dmu if mu1 is not None and mu2 is not None else 0.0
+        kl_rev = 0.5 * (trace_term_rev - d + logdet_K2 - logdet_K1 + mahal_rev)
+        kl = 0.5 * (kl + kl_rev)
+
     if normalize:
         kl /= d
     return kl
