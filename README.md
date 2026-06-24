@@ -63,7 +63,7 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-seqfn`, `--sequence_file` | Path to DNA sequence file (`.seq` extension). Output filename derived from this if `-o` not specified. |
 | `-seq`, `--sequence` | DNA sequence as string (alternative to `-seqfn`). Requires `-o` to specify output filename. |
-| `-m`, `--model` | DNA model for parameter generation. Choices: `cgnaplus` (default), `md`, `crystal`. |
+| `-m`, `--model` | DNA model for parameter generation. Choices: `cgnaplus` (default), `md`, `crystall`. |
 | `-o`, `--output_basename` | Base filename for output files (required if using `-seq`). |
 
 ### Coarse-Graining Options
@@ -96,20 +96,22 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-ul`, `--unit_length` | Set unit length in nm. Rescales parameters to chosen scale. E.g., `-ul 3.4` rescales all lengths by 1/3.4 (default: 1.0 nm). |
 | `-ue`, `--unit_energy` | Set unit energy in kT. Rescales parameters to chosen scale (default: 1.0 kT). |
-| `-sr`, `--stiff_resc` | Rescale stiffness of individual dimensions: `-sr factor dim [dim ...]`. Can be repeated. |
+| `-sr`, `--stiff_resc` | Rescale stiffness of individual degrees of freedom: `-sr FACTOR DIM [DIM ...]`. Dimensions are indexed `0..5` (rotational `0,1,2`; translational `3,4,5`). The flag can be repeated for different factors, e.g. `-sr 2.0 0 -sr 5.0 3 4`. |
+| `-rbcg`, `--rescale_before_cg` | Apply the `-sr` rescaling to the base-pair-step stiffness **before** coarse-graining (inside `gen_params`) instead of to the coarse-grained matrix afterwards. Also applies when `-cg 1`. Because coarse-graining mixes degrees of freedom, the two orders generally give different results. Requires a PolyCG version that supports the `dof_rescale` argument (default: off, i.e. rescale after coarse-graining). |
 
 ### Configuration Generation
 
 | Option | Description |
 |--------|-------------|
-| `-conf`, `--configuration_method` | Configuration type: `straight`/`str`, `circular`/`circ`, `ground_state`/`gs`. |
+| `-conf`, `--configuration_method` | Configuration type: `straight`/`str`, `circular`/`circ`, `ground_state`/`gs`. If omitted, no configuration (`.data`) file is written. |
+| `-dlk`, `--excess_link` | Excess linking number applied when building the configuration (default: 0.0). |
 | `-mass` | Mass of atoms in output (default: 1.0). |
 
 ### Output Options
 
 | Option | Description |
 |--------|-------------|
-| `-dec`, `--decimals` | Number of decimal places for output formatting (default: 2). |
+| `-dec`, `--decimals` | Number of decimal places for output formatting (default: 4). |
 | `-nodup`, `--remove_duplicate` | Remove duplicate coupling styles (default: True). |
 | `-xyz`, `--gen_xyz` | Generate XYZ coordinate file. |
 | `-pdb`, `--gen_pdb` | Generate PDB structure file. |
@@ -132,8 +134,11 @@ python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 200 1.
 # Rescale to simulation units (length in units of 0.34 nm)
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -ul 0.34 -conf gs
 
-# Selectively rescale twist stiffness (dimension 2)
-python -m cgrbptools.lmp_input -seqfn Examples/200bp -sr 0.5 2 -conf gs
+# Selectively rescale twist stiffness (dimension 2) on the coarse-grained matrix
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -sr 0.5 2 -conf gs
+
+# Same rescaling, but applied to the base-pair-step stiffness before coarse-graining
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -sr 0.5 2 -rbcg -conf gs
 ```
 
 ---
@@ -401,13 +406,13 @@ conf.visualize_xyz('output')
 The `ConfBuilder` class provides factory methods for creating configurations from topology.
 
 ```python
-from cgrbptools.io.conf_builder import ConfBuilder
+from cgrbptools.core.conf_builder import ConfBuilder
 
 # Build configuration by type
 conf = ConfBuilder.build(topology, conf_type='straight', mass=1.0)
 
 # Or use specific methods
-conf = ConfBuilder.straight(topology, excess_twist=0, mass=1.0)
+conf = ConfBuilder.straight(topology, excess_link=0, mass=1.0)
 conf = ConfBuilder.circular(topology, excess_link=0, mass=1.0)
 conf = ConfBuilder.ground_state(topology, mass=1.0)
 ```
@@ -416,8 +421,8 @@ conf = ConfBuilder.ground_state(topology, mass=1.0)
 
 | Type | Aliases | Description |
 |------|---------|-------------|
-| `straight` | `str`, `linear`, `line` | Straight chain along z-axis |
-| `circular` | `circ`, `closed` | Regular polygon in xy-plane |
+| `straight` | `str`, `lin`, `linear`, `line` | Straight chain along z-axis |
+| `circular` | `circ`, `circle`, `closed` | Regular polygon in xy-plane |
 | `ground_state` | `gs`, `shape`, `groundstate` | Exact groundstate configuration |
 
 ---
@@ -437,11 +442,34 @@ The rescaling follows the transformation:
 - Groundstate translations: `X_trans → X_trans / unit_length`
 - Stiffness matrix: Entries are rescaled according to their dimensional type (translation-translation, rotation-translation, etc.)
 
+Length and energy rescaling are applied to the topology via `set_unit_length()` and
+`set_unit_energy()` after the (possibly coarse-grained) parameters have been assigned;
+the resulting `unit length` / `unit energy` values are recorded in the database header.
+
 ### Energy Rescaling (`-ue`)
 
 When `-ue VALUE` is specified:
-- All stiffness matrix entries are scaled by `VALUE`
-- **Example**: `-ue 0.592` converts from kT at 300K to kcal/mol
+- All stiffness matrix entries are scaled by `1/VALUE` (the parameters are expressed in
+  a new energy unit equal to `VALUE` kT)
+- **Example**: `-ue 0.592` expresses energies in units of 0.592 kT (≈ kcal/mol at 300 K)
+
+### Per-Dimension Stiffness Rescaling (`-sr` / `-rbcg`)
+
+In addition to the unit rescaling above, individual stiffness degrees of freedom can be
+rescaled with `-sr FACTOR DIM [DIM ...]` (repeatable). Dimensions are indexed `0..5`
+(rotational `0,1,2`; translational `3,4,5`). Each selected dimension has its stiffness
+rows and columns multiplied so that diagonal entries scale by `FACTOR` and cross-couplings
+scale by `sqrt(FACTOR)`.
+
+The order relative to coarse-graining matters:
+
+- **Default (after coarse-graining)**: the rescaling is applied to the coarse-grained
+  stiffness matrix.
+- **`-rbcg` (before coarse-graining)**: the rescaling is forwarded to `gen_params` as
+  `dof_rescale` and applied to the base-pair-step stiffness before coarse-graining (this
+  also takes effect when `-cg 1`). Because coarse-graining mixes degrees of freedom, the
+  two orders generally yield different coarse-grained stiffness matrices. This requires a
+  PolyCG version that supports the `dof_rescale` argument.
 
 ### Accessing Original Units
 
@@ -479,7 +507,7 @@ The backmapping procedure:
 ### Usage
 
 ```python
-from cgrbptools.io.backmap import dna_backmap
+from cgrbptools.core.backmap import dna_backmap
 
 # Backmap coarse-grained configuration
 bp_poses = dna_backmap(
@@ -605,7 +633,7 @@ cgRBPtools supports three base pair step stiffness libraries through the PolyCG 
 |-------|-------------|
 | `cgnaplus` (default) | Most recent molecular dynamics derived elasticity database. Parameters are marginalized from the higher-order model that includes rigid bases and rigid phosphates. (Sharma et al. 2023) |
 | `md` | Parameters from MD simulations (Lankaš et al. 2003) |
-| `crystal` | Parameters from crystallographic data (Olson et al. 1998) |
+| `crystall` | Parameters from crystallographic data (Olson et al. 1998) |
 
 
 ---

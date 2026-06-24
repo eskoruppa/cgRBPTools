@@ -179,18 +179,19 @@ if __name__ == "__main__":
         help='Set energy unit energy in kT. Rescales parameters to chosen scale. (default: 1.0 kT)') 
     
     parser.add_argument(
-        "-sr", "--stiff_resc",
-        action="append",
-        nargs="+",
+        '-sr', '--stiff_resc',
+        action='append',
+        nargs='+',
         default=[],
-        metavar=("FACTOR", "DIM"),
-        help="Rescale stiffness of individual dimensions: -sr FACTOR DIM [DIM ...]. "
-             "Repeat the flag for different factors, e.g. -sr 2.0 0 -sr 5.0 3 4 "
-             "scales dim 0 by 2.0 and dims 3,4 by 5.0.")
+        metavar=('FACTOR', 'DIM'),
+        help='Rescale stiffness of individual dimensions: -sr FACTOR DIM [DIM ...]. '
+             'Repeat the flag for different factors, e.g. -sr 2.0 0 -sr 5.0 3 4 '
+             'scales dim 0 by 2.0 and dims 3,4 by 5.0.')
 
     parser.add_argument(
-        "--rescale_before_cg",
-        action="store_true",
+        '-rbcg',
+        '--rescale_before_cg',
+        action='store_true',
         default=False,
         help="Apply the --stiff_resc rescaling to the base-pair-step stiffness BEFORE "
              "coarse-graining (inside gen_params) instead of to the coarse-grained matrix "
