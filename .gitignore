@@ -23,6 +23,7 @@ PolyCG/
 **eval_e2e*
 **eval_KL*
 **eval_lb*
+**debug_euler_alignment.py
 **generate_input.ipynb
 **InstructionsLBAssessment.md
 test.custom
