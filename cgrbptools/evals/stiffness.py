@@ -5,7 +5,7 @@ import scipy as sp
 from numpy.linalg import slogdet, solve
 from scipy.linalg import cho_factor, cho_solve
 from scipy.stats import pearsonr
-from .se3 import poses2junctions, junctions2parameters, junctions2dynamics 
+from .se3 import poses2junctions, junctions2parameters, junctions2dynamics, parameters2junctions
 from ..core.topology import CGRBPTopology
 
 
@@ -49,8 +49,6 @@ def dynamicparams2stiffness(
     if subtract_mean:
         dynamic_params = dynamic_params - dynamic_params.mean(axis=0)
 
-    # Accumulate X^T X in chunks to bound peak extra memory to
-    # O(chunk_size * n_features) rather than the full array size.
     if chunk_size is not None:
         cov = np.zeros((n_features, n_features), dtype=dynamic_params.dtype)
         for start in range(0, nsteps, chunk_size):
@@ -58,45 +56,246 @@ def dynamicparams2stiffness(
             cov += chunk.T @ chunk
         cov /= nsteps
     else:
-        # Single BLAS dsyrk call — O(n_features^2) extra memory.
         cov = (dynamic_params.T @ dynamic_params) / nsteps
 
     stiffmat = np.linalg.inv(cov)
     return stiffmat
 
-def eval_gs_and_stiffness(poses: np.ndarray, topol: CGRBPTopology, use_known_gs: bool = False) -> tuple[np.ndarray, np.ndarray]:
-    junctions = poses2junctions(poses)
-    params = junctions2parameters(junctions)
-    mean_params = np.mean(params, axis=0)
+def align_euler_angles(
+    params: np.ndarray,
+    known_gs: np.ndarray | None = None,
+    pi_threshold: float = np.pi * 0.5,
+) -> np.ndarray:
+    """Correct antipodal branch-cut ambiguities in the Euler-vector (rotation)
+    components of SE3 parameters.
 
-    if use_known_gs:
-        gs = topol.get_groundstate()
+    When the rotation angle ‖Ω‖ is near π, the SO(3) logarithmic map has an
+    antipodal ambiguity: Ω and −Ω represent the same rotation.  This causes
+    individual frames to appear on the 'wrong' branch, shifting the empirical
+    mean by ~2π relative to the true groundstate (most visible at ~5 bp/bead
+    CG resolution where the helical twist per junction is ≈ π).
+
+    The correction rule is: for each sample, if −Ω_t is closer (in Euclidean
+    distance) to the reference than Ω_t is — equivalently, if Ω_t · Ω_ref < 0
+    — replace Ω_t with −Ω_t.  Only vectors with ‖Ω_t‖ > ``pi_threshold`` are
+    candidates, preventing spurious flips of near-identity rotations.
+
+    Parameters
+    ----------
+    params : (NSteps, nbps, 6) ndarray
+        SE3 parameter array.  First 3 entries per junction are the rotational
+        Euler-vector components; last 3 are translational (not modified).
+    known_gs : (nbps, 6) ndarray or None
+        Known groundstate parameters.  If provided, ``known_gs[:, :3]`` is
+        used as the per-junction reference for the flip decision.  If None,
+        the per-junction componentwise median across the sample is used as a
+        robust reference (reliable when fewer than half the samples are on the
+        wrong branch).
+    pi_threshold : float, optional
+        Minimum Euler-vector magnitude (radians) below which a sample is never
+        flipped.  Default is π/2.  Prevents accidental inversion of
+        small-angle (near-identity) rotations for which the antipodal
+        ambiguity does not exist.
+
+    Returns
+    -------
+    corrected_params : ndarray
+        Copy of ``params`` with corrected rotational components.
+    """
+    if params.ndim != 3 or params.shape[-1] != 6:
+        raise ValueError(
+            f"params must have shape (NSteps, nbps, 6), got {params.shape}"
+        )
+
+    params = params.copy()
+    rot = params[:, :, :3]
+
+    if known_gs is not None:
+        ref = np.asarray(known_gs)[:, :3]
     else:
-        gs = mean_params
+        # Componentwise median is robust when the majority is on the correct branch
+        ref = np.median(rot, axis=0)
+
+    # Dot product of each sample with its per-junction reference: (NSteps, nbps)
+    dot = np.einsum('tji,ji->tj', rot, ref)
+
+    # Magnitude of each sample's rotation vector: (NSteps, nbps)
+    mag = np.linalg.norm(rot, axis=-1)
+
+    # Identify flipped samples: dot < 0 AND magnitude above threshold
+    flip_mask = (dot < 0) & (mag > pi_threshold)
+
+    # Correct with a 2π shift, NOT a plain sign flip.
+    #
+    # For a true rotation angle θ_true > π the SO(3) log map returns the
+    # antipodal representation Ω_log = -(2π - θ_true) * n̂_true, which has
+    #   • opposite direction to the true axis n̂_true
+    #   • magnitude ‖Ω_log‖ = 2π - θ_true  (< π)
+    #
+    # The correct representative on the "extended" branch is:
+    #   Ω_corrected = (2π - ‖Ω_log‖) * (-Ω_log / ‖Ω_log‖)
+    #              = -(2π / ‖Ω_log‖ - 1) * Ω_log
+    #
+    # At ‖Ω_log‖ = π this reduces to the plain sign flip.
+    # For ‖Ω_log‖ < π the corrected magnitude 2π - ‖Ω_log‖ > π, which is
+    # the intended "beyond π" extension that removes the arithmetic-mean bias.
+    safe_mag = np.where(flip_mask, mag, 1.0)
+    scale = np.where(flip_mask, -(2.0 * np.pi / safe_mag - 1.0), 1.0)
+    params[:, :, :3] = scale[:, :, np.newaxis] * rot
+    return params
+
+
+def compute_groundstate_riemannian(
+    junctions: np.ndarray,
+    init_gs: np.ndarray | None = None,
+    max_iter: int = 50,
+    tol: float = 1e-8,
+) -> np.ndarray:
+    """Compute the Fréchet mean groundstate on SE(3) via Riemannian gradient descent.
+
+    For the Y-convention LAMMPS potential the energy is harmonic in
+    ``Φ_dynamic = log(S^{-1} · G)``, so the optimal groundstate *S* satisfies
+    ``⟨log(S^{-1} · G_i)⟩ = 0``, which is the Fréchet mean of {G_i} on SE(3).
+
+    The standard intrinsic mean iteration (Riemannian gradient descent with
+    unit step size) is::
+
+        S ← S · exp( ⟨log(S^{-1} · G_i)⟩ )
+
+    This converges to the Fréchet mean when the distribution is sufficiently
+    concentrated (‖Φ_dynamic‖ < π almost surely), which holds for typical DNA
+    MD trajectories.
+
+    Parameters
+    ----------
+    junctions : (NSteps, nbps, 4, 4) ndarray
+        SE(3) junction matrices for each snapshot and base-pair step.
+    init_gs : (nbps, 6) ndarray or None
+        Initial groundstate parameters (Euler vector + translation).  If None,
+        the branch-corrected arithmetic mean of the junctions is used as a
+        warm start.
+    max_iter : int, optional
+        Maximum number of iterations.  Default 50.
+    tol : float, optional
+        Convergence tolerance: iteration stops when
+        ``max |μ| < tol``.  Default 1e-8.
+
+    Returns
+    -------
+    gs_params : (nbps, 6) ndarray
+        Groundstate SE(3) parameters, i.e. ``log(S)`` expressed as
+        Euler vector + translation.
+    """
+    junctions = np.asarray(junctions, dtype=float)
+    if junctions.ndim != 4 or junctions.shape[-2:] != (4, 4):
+        raise ValueError(
+            f"junctions must have shape (NSteps, nbps, 4, 4), got {junctions.shape}"
+        )
+    nbps = junctions.shape[1]
+
+    if init_gs is not None:
+        init_gs = np.asarray(init_gs, dtype=float)
+        if init_gs.shape != (nbps, 6):
+            raise ValueError(
+                f"init_gs must have shape ({nbps}, 6), got {init_gs.shape}"
+            )
+        S = parameters2junctions(init_gs)
+    else:
+        # Branch-corrected arithmetic mean as warm start
+        params0 = junctions2parameters(junctions)
+        params0 = align_euler_angles(params0)
+        mean0   = np.mean(params0, axis=0)
+        S = parameters2junctions(mean0) 
+
+    for i in range(max_iter):
+        print(f"Riemannian mean iteration: computing gradient... (step {i+1}/{max_iter})")
+        # D_i = S^{-1} · G_i  (tangent-space coordinates at S)
+        dyn = junctions2dynamics(junctions, static_junctions=S)
+        phi = junctions2parameters(dyn)
+        phi = align_euler_angles(phi)
+
+        # Riemannian gradient = tangent-space mean
+        mu = np.mean(phi, axis=0)
+
+        # Retract: S ← S · exp(μ)
+        exp_mu = parameters2junctions(mu)
+        S = np.matmul(S, exp_mu)
+
+        print(f'  max |μ| = {np.max(np.abs(mu)):.2e}')
+        if np.max(np.abs(mu)) < tol:
+            break
+
+    # Convert the converged S back to Lie-algebra coordinates
+    gs_params = junctions2parameters(S)
+    return gs_params
+
+
+def eval_gs_and_stiffness(
+    poses: np.ndarray, 
+    topol: CGRBPTopology, 
+    use_known_gs: bool = False,
+    plot_twist_savefig: str | None = None,
+    plot_twist_junction: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    junctions   = poses2junctions(poses)
 
     if topol.subtract_groundstate:
-        dynamic_params = params - gs
+        params_raw  = junctions2parameters(junctions)
+        params      = align_euler_angles(params_raw, known_gs=topol.get_groundstate() if use_known_gs else None)
+
+        if plot_twist_savefig is not None:
+            plot_twist_alignment(
+                params_raw, params,
+                junction_idx=plot_twist_junction,
+                savefig=plot_twist_savefig,
+            )
+        mean_params = np.mean(params, axis=0)
+        dynamic_params = params - topol.get_groundstate() if use_known_gs else params - mean_params
+
     else:
-        dynamic_junctions = junctions2dynamics(junctions, static_params=gs)
+        print(f'Computing groundstate via Riemannian mean for stiffness calculation...')
+        mean_params = compute_groundstate_riemannian(
+            junctions,
+            init_gs=topol.get_groundstate() if use_known_gs else None,
+        )
+        dynamic_junctions = junctions2dynamics(junctions, static_params=topol.get_groundstate() if use_known_gs else mean_params)
         dynamic_params = junctions2parameters(dynamic_junctions)
 
     stiffmat = dynamicparams2stiffness(dynamic_params)
     return mean_params, stiffmat
 
-def eval_gs_and_diagonal_stiffness(poses: np.ndarray, topol: CGRBPTopology, use_known_gs: bool = False) -> tuple[np.ndarray, np.ndarray]:
-    junctions = poses2junctions(poses)
-    params = junctions2parameters(junctions)
-    mean_params = np.mean(params, axis=0)
 
-    if use_known_gs:
-        gs = topol.get_groundstate()
-    else:
-        gs = mean_params
+def eval_gs_and_diagonal_stiffness(
+    poses: np.ndarray,
+    topol: CGRBPTopology,
+    use_known_gs: bool = False,
+    plot_twist_savefig: str | None = None,
+    plot_twist_junction: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    
+    junctions   = poses2junctions(poses)
 
     if topol.subtract_groundstate:
-        dynamic_params = params - gs
+        params_raw  = junctions2parameters(junctions)
+        params      = align_euler_angles(params_raw, known_gs=topol.get_groundstate() if use_known_gs else None)
+
+        if plot_twist_savefig is not None:
+            plot_twist_alignment(
+                params_raw, params,
+                junction_idx=plot_twist_junction,
+                savefig=plot_twist_savefig,
+            )
+        mean_params = np.mean(params, axis=0)
+        dynamic_params = params - topol.get_groundstate() if use_known_gs else params - mean_params
+
     else:
-        dynamic_junctions = junctions2dynamics(junctions, static_params=gs)
+        print(f'Computing groundstate via Riemannian mean for stiffness calculation...')
+        mean_params = compute_groundstate_riemannian(
+            junctions,
+            init_gs=topol.get_groundstate() if use_known_gs else None,
+        )
+        dynamic_junctions = junctions2dynamics(junctions, static_params=topol.get_groundstate() if use_known_gs else mean_params)
         dynamic_params = junctions2parameters(dynamic_junctions)
 
     var = np.mean(dynamic_params**2, axis=0)
@@ -177,7 +376,6 @@ def diagonal_marginals(stiffmat: np.ndarray | sp.sparse.spmatrix, n_neighbors: i
         marginals[block_idx, :] = 1.0 / diag_entries
     
     return marginals
-
 
 
 def kullbackleibler_divergence_2(K1, K2, normalized: bool = False, symmetrize: bool = True):
@@ -383,3 +581,88 @@ def pearson_matrix_correlation(K_target, K_MD, normalize=False):
 
     r, _ = pearsonr(vec_target, vec_MD)
     return r
+
+
+def plot_twist_alignment(
+    params_raw: np.ndarray,
+    params_aligned: np.ndarray,
+    junction_idx: int = 0,
+    savefig: str | None = None,
+) -> None:
+    """Plot the twist (rotational Euler-vector component 2) for a single
+    junction over all snapshots, comparing uncorrected and corrected values.
+
+    Four-panel layout:
+      Left column  – time series (snapshot index vs Ω₂)
+      Right column – histogram of Ω₂ values
+    Upper row is uncorrected; lower row is corrected.
+
+    Parameters
+    ----------
+    params_raw : (NSteps, nbps, 6) ndarray
+        Raw SE3 parameters before antipodal alignment.
+    params_aligned : (NSteps, nbps, 6) ndarray
+        SE3 parameters after antipodal alignment.
+    junction_idx : int, optional
+        Which junction to inspect.  Default is 0.
+    savefig : str or None, optional
+        Base file path (without extension) to save the figure.  PNG and SVG
+        are written.  If None, the figure is shown interactively.
+    """
+    import matplotlib.pyplot as plt
+
+    raw_twist     = params_raw[:, junction_idx, 2]
+    aligned_twist = params_aligned[:, junction_idx, 2]
+    frames        = np.arange(raw_twist.shape[0])
+
+    mean_raw = np.mean(raw_twist)
+    mean_aln = np.mean(aligned_twist)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 5),
+                             gridspec_kw={'width_ratios': [3, 1]})
+
+    # --- top-left: raw time series ---
+    axes[0, 0].plot(frames, raw_twist, lw=0.3, color='steelblue', alpha=0.5)
+    axes[0, 0].axhline(mean_raw, color='red', lw=1.2, ls='--',
+                       label=f'mean = {mean_raw:.4f} rad')
+    axes[0, 0].set_ylabel('Twist $\\Omega_3$ (rad)')
+    axes[0, 0].set_title(f'Uncorrected — junction {junction_idx}')
+    axes[0, 0].legend(fontsize=8)
+
+    # --- top-right: raw histogram ---
+    bin_edges = np.linspace(raw_twist.min(), raw_twist.max(),
+                            min(200, int(raw_twist.shape[0] ** 0.5) + 20))
+    axes[0, 1].hist(raw_twist, bins=bin_edges, color='steelblue', alpha=0.7,
+                    orientation='vertical')
+    axes[0, 1].axvline(mean_raw, color='red', lw=1.2, ls='--')
+    axes[0, 1].set_xlabel('Twist $\\Omega_3$ (rad)')
+    axes[0, 1].set_ylabel('Count')
+    axes[0, 1].set_title('Distribution (raw)')
+
+    # --- bottom-left: aligned time series ---
+    axes[1, 0].plot(frames, aligned_twist, lw=0.3, color='darkorange', alpha=0.5)
+    axes[1, 0].axhline(mean_aln, color='red', lw=1.2, ls='--',
+                       label=f'mean = {mean_aln:.4f} rad')
+    axes[1, 0].set_ylabel('Twist $\\Omega_3$ (rad)')
+    axes[1, 0].set_xlabel('Snapshot index')
+    axes[1, 0].set_title(f'Corrected — junction {junction_idx}')
+    axes[1, 0].legend(fontsize=8)
+
+    # --- bottom-right: aligned histogram ---
+    bin_edges_aln = np.linspace(aligned_twist.min(), aligned_twist.max(),
+                                min(200, int(aligned_twist.shape[0] ** 0.5) + 20))
+    axes[1, 1].hist(aligned_twist, bins=bin_edges_aln, color='darkorange',
+                    alpha=0.7, orientation='vertical')
+    axes[1, 1].axvline(mean_aln, color='red', lw=1.2, ls='--')
+    axes[1, 1].set_xlabel('Twist $\\Omega_3$ (rad)')
+    axes[1, 1].set_ylabel('Count')
+    axes[1, 1].set_title('Distribution (corrected)')
+
+    plt.tight_layout()
+
+    if savefig is not None:
+        plt.savefig(f'{savefig}.png', dpi=150, bbox_inches='tight')
+        plt.savefig(f'{savefig}.svg', bbox_inches='tight')
+        plt.close(fig)
+    else:
+        plt.show()

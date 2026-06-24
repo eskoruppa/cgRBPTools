@@ -1,3 +1,4 @@
+# import cgRBPTools.cgrbptools as cg
 import cgrbptools as cg
 import numpy as np
 import scipy as sp
@@ -239,43 +240,91 @@ def plot_acf_with_fit(e2e: np.ndarray, ax=None) -> tuple[float, float]:
     return tau, tau_err
 
 
+def limit_couprange(stiff: np.ndarray, coup_range: int) -> np.ndarray:
+    """Zero out stiffness matrix elements beyond the specified coupling range.
+
+    Parameters
+    ----------
+    stiff : (6N, 6N) stiffness matrix
+    coup_range : maximum base pair separation for nonzero couplings
+
+    Returns
+    -------
+    limited_stiff : (6N, 6N) stiffness matrix with long-range couplings zeroed out
+    """
+    N = stiff.shape[0] // 6
+    limited_stiff = np.copy(stiff)
+    for i in range(N):
+        for j in range(N):
+            if abs(i - j) > coup_range:
+                limited_stiff[i*6:(i+1)*6, j*6:(j+1)*6] = 0
+    return limited_stiff
+
+
+
 
 if __name__ == "__main__":
 
-    fn = sys.argv[1]
-    basefn = str(Path(fn).with_suffix(''))  # remove extension
+    fns = sys.argv[1:]
+    step = 1000
 
-    # basefn = 'data/201bp_cg1' 
-    customfn = basefn + '.custom'
-    stiffmat_fn = basefn + '_stiff.npz'
-    step = 100
+    for fn in fns:
+        print(fn)
+        basefn = str(Path(fn).with_suffix(''))  # remove extension
+        customfn = basefn + '.custom'
 
-    custom = cg.LoadCustom(customfn,stride = 4)
-    ref_stiffmat = sp.sparse.load_npz(stiffmat_fn).toarray()
+        databasefn =  basefn + '.db'
+        if not os.path.exists(databasefn):
+            N = len(Path(basefn).name)
+            for i in range(1,N-1):
+                databasefn =  basefn[:-i] + '.db'
+                print(databasefn)
+                if os.path.exists(databasefn):
+                    print(f"Found database file: {databasefn}")
+                    break
+        if not os.path.exists(databasefn):
+            raise FileNotFoundError(f"Database file not found for base filename '{basefn}'. Checked: {databasefn} and {basefn.split('_dt')[0] + '.db'}")
 
-    dparams = custom.get_parameters(dynamic=True)
-    # dparams = dparams[:10000]
-    # Load reference stiffness matrix (using coarse-grained with all data)
-    ref_stiffmat = cg.dynamicparams2stiffness(dparams, subtract_mean=False, chunk_size=None)
-    
-    kls, frobs, pearsons = stepwise_stiff(ref_stiffmat, dparams, step=step)
+        fullbasefn = str(Path(databasefn).with_suffix(''))
+        topol = cg.CGRBPTopology.read_database(databasefn)
+        couprange = topol.coupling_range
+        print(f"Coupling range from topology: {couprange}")
 
-    kls[kls > 2] = np.nan
-    frobs[np.isnan(kls)] = np.nan
-    pearsons[np.isnan(kls)] = np.nan
+        try:
+            stiffmat_fn = basefn + '_stiff.npz'
+            print(f"Loading reference stiffness matrix from {stiffmat_fn}...")
+            ref_stiffmat = sp.sparse.load_npz(stiffmat_fn).toarray()
+        except FileNotFoundError:
+            print(f"Reference stiffness matrix not found at {stiffmat_fn}. Falling back to basename")
+            stiffmat_fn = fullbasefn + '_stiff.npz'
+            print(f"Loading reference stiffness matrix from {stiffmat_fn}...")
+            ref_stiffmat = sp.sparse.load_npz(stiffmat_fn).toarray()
 
-    np.savez(basefn + f'_metrics_step{step}.npz', kl=kls, frob=frobs, pearson=pearsons)
+        savefn = basefn + f'_metrics_step{step}.npz'
 
-    # Plot the metrics
-    fig, axes = plot_metrics(kls, frobs, pearsons, step=step,fit=True)
-    
-    savefn = basefn + f'_metrics_step{step}'
-    fig.savefig(savefn + '.png', dpi=300)
-    fig.savefig(savefn + '.pdf', dpi=300, transparent=True)
-    fig.savefig(savefn + '.svg', dpi=300, transparent=True)
-    plt.close()
+        try:
+            custom = cg.LoadCustom(customfn, stride = 1, verbose = True)
+            dparams = custom.get_parameters(dynamic=True, subtract_groundstate=False)
+        except ValueError as e:
+            print('#'*80)
+            print(f"Error processing {customfn}: {e}")
+            continue
 
-    # tau, tau_err = plot_acf_with_fit(e2e)
-    # plt.tight_layout()
-    # plt.show()
+        ref_stiffmat = limit_couprange(ref_stiffmat, coup_range=couprange)
+        kls, frobs, pearsons = stepwise_stiff(ref_stiffmat, dparams, step=step)
+
+        np.savez(savefn, kl=kls, frob=frobs, pearson=pearsons)
+
+        # Plot the metrics
+        fig, axes = plot_metrics(kls, frobs, pearsons, step=step,fit=True)
+        
+        savefn = basefn + f'_metrics_step{step}'
+        fig.savefig(savefn + '.png', dpi=300)
+        fig.savefig(savefn + '.pdf', dpi=300, transparent=True)
+        fig.savefig(savefn + '.svg', dpi=300, transparent=True)
+        plt.close()
+
+        # tau, tau_err = plot_acf_with_fit(e2e)
+        # plt.tight_layout()
+        # plt.show()
 

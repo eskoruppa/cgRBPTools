@@ -226,8 +226,10 @@ if __name__ == "__main__":
     if not custom_file.exists():
         raise ValueError(f"Custom parameter file '{custom_file}' does not exist.")
      
-    custom = LoadCustom(custom_file)
+    custom = LoadCustom(custom_file, verbose=True)
+    print('loaded custom')
     poses = custom.poses(unwrap=True, reduced=False)
+    print('calculated poses')
     
     #####################################################
     # load topology from database file
@@ -261,7 +263,11 @@ if __name__ == "__main__":
               
     #####################################################
     # analysis ensemble
-    mean_params, stiff_params = eval_gs_and_diagonal_stiffness(poses, topol, use_known_gs=False)
+    twist_fn = basefn.with_name(basefn.stem + '_twist_alignment')
+    mean_params, stiff_params = eval_gs_and_diagonal_stiffness(
+        poses, topol, use_known_gs=False,
+        plot_twist_savefig=str(twist_fn), plot_twist_junction=0,
+    )
 
     #####################################################
     # sanity checks

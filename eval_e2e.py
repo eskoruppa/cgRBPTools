@@ -1,4 +1,4 @@
-import cgrbptools as cg
+import cgRBPTools.cgrbptools as cg
 import numpy as np
 import sys,os,glob
 from pathlib import Path
@@ -104,18 +104,34 @@ def plot_acf_with_fit(e2e: np.ndarray, ax=None) -> tuple[float, float]:
 
 if __name__ == "__main__":
 
-    fn = sys.argv[1]
-    basefn = str(Path(fn).with_suffix(''))  # remove extension
-    customfn = basefn + '.custom'
+    # fn = sys.argv[1]
+    # path = sys.argv[1]
+    # fns = glob.glob(f'{path}/*.custom')
+    fns = sys.argv[1:]
 
-    e2e = fn2e2e(customfn, stride = 1, verbose = True)
-    np.save(basefn + '_e2e.npy', e2e)
+    for fn in fns:
+        print(fn)
+        basefn = str(Path(fn).with_suffix(''))  # remove extension
+        customfn = basefn + '.custom'
 
-    tau, tau_err, fig, ax = plot_acf_with_fit(e2e)
-    plt.tight_layout()
+        savefn = basefn + '_e2e.npy'
+        if os.path.exists(savefn):
+            print(f"Loading precomputed e2e distances from {savefn}...")
+            e2e = np.load(savefn)
+        else:
+            try:
+                e2e = fn2e2e(customfn, stride = 1, verbose = True)
+                np.save(savefn, e2e)
+            except ValueError as e:
+                print(f"Error processing {customfn}: {e}")
+                continue
 
-    savefn = basefn + f'_e2e_autocorr'
-    fig.savefig(savefn + '.png', dpi=300)
-    fig.savefig(savefn + '.pdf', dpi=300, transparent=True)
-    fig.savefig(savefn + '.svg', dpi=300, transparent=True)
-    plt.close()
+        # tau, tau_err, fig, ax = plot_acf_with_fit(e2e)
+        # plt.tight_layout()
+
+
+    # savefn = basefn + f'_e2e_autocorr'
+    # fig.savefig(savefn + '.png', dpi=300)
+    # fig.savefig(savefn + '.pdf', dpi=300, transparent=True)
+    # fig.savefig(savefn + '.svg', dpi=300, transparent=True)
+    # plt.close()

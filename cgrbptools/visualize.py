@@ -49,6 +49,13 @@ if __name__ == "__main__":
         required=False,
         help='Stride for visualizing snapshots when visualizing all.'
     ) 
+    parser.add_argument(
+        '-o',       
+        '--output',    
+        type=str, default=None,
+        required=False,
+        help='Output file for the visualized snapshots.'
+    ) 
     args = parser.parse_args()
     
     # load lmps custom output file
@@ -67,12 +74,14 @@ if __name__ == "__main__":
     topol = CGRBPTopology.read_database(dbfn)
     custom = LoadCustom(custom_file)
     poses = custom.poses(unwrap=True, reduced=False)
+
+    baseout = args.output if args.output is not None else basefn
     
     if not args.all:
         if args.snapshot >= len(poses) or args.snapshot < -len(poses):
             raise ValueError(f"Snapshot index '{args.snapshot}' is out of range. The number of available snapshots is {len(poses)}.")
         conf = ConfBuilder.from_poses(poses[args.snapshot],topol)
-        conf.visualize_chimerax(basefn, include_bps_triads=True)
+        conf.visualize_chimerax(baseout, include_bps_triads=True)
     else:
         # for i in range(0,len(poses),args.stride):
         #     print(f'Visualizing snapshot {i} / {len(poses)}')
@@ -90,10 +99,7 @@ if __name__ == "__main__":
             bp_poses = dna_backmap(conf,verbose=False)
             snaps.append(bp_poses)
 
-            # if i > 1600:
-            #     break
-        
         snaps = np.array(snaps)
-        iopmc.gen_cif_trajectory(str(basefn)+'.cif', snaps[:,:,:3,3], snaps[:,:,:3,:3], sequence=topol.sequence)
+        iopmc.gen_cif_trajectory(str(baseout)+'.cif', snaps[:,:,:3,3], snaps[:,:,:3,:3], sequence=topol.sequence)
 
         

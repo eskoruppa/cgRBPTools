@@ -17,3 +17,15 @@
 
 # ignore egg-info directory
 **.egg-info/
+
+# general
+PolyCG/
+**eval_e2e*
+**eval_KL*
+**eval_lb*
+**generate_input.ipynb
+**InstructionsLBAssessment.md
+test.custom
+test_parse_custom.py
+test_readme_extensions
+CG-RBP/

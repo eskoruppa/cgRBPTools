@@ -17,27 +17,32 @@ from .core.matrix_methods import rescale_stiff
 
 GEN_INPUT_CGNAP_SETNAME = 'curves_plus'
 
-def parse_rescaling(resc_args, ndim=6):
+def parse_rescaling(resc_args, parser=None, ndim=6):
+    def fail(msg):
+        if parser is not None:
+            parser.error(msg)
+        raise argparse.ArgumentTypeError(msg)
+
     scale = [1.0] * ndim
     for group in resc_args:
         if len(group) < 2:
-            raise argparse.ArgumentTypeError(
-                "-r/--resc requires: factor dim [dim ...]"
-            )
+            fail("-sr/--stiff_resc requires: FACTOR DIM [DIM ...]")
         try:
             factor = float(group[0])
         except ValueError:
-            raise argparse.ArgumentTypeError(f"Invalid scale factor for rescaling'{group[0]}'")
+            fail(f"Invalid scale factor for rescaling '{group[0]}'")
 
         for d_str in group[1:]:
             try:
                 d = int(d_str)
             except ValueError:
-                raise argparse.ArgumentTypeError(f"Invalid rescaling dimension '{d_str}'. Only the first argument can be a float factor; the rest must be integer dimensions.")
+                fail(f"Invalid rescaling dimension '{d_str}'. Only the first argument can be a float factor; the rest must be integer dimensions.")
 
             if not (0 <= d < ndim):
-                raise argparse.ArgumentTypeError(f"Rescaling dimension {d} out of range (0..{ndim-1})")
+                fail(f"Rescaling dimension {d} out of range (0..{ndim-1})")
 
+            if scale[d] != 1.0 and scale[d] != factor:
+                print(f"Warning: dimension {d} rescaled more than once; using last factor {factor} (overriding {scale[d]}).", file=sys.stderr)
             scale[d] = factor
     return scale
 
@@ -179,7 +184,19 @@ if __name__ == "__main__":
         nargs="+",
         default=[],
         metavar=("FACTOR", "DIM"),
-        help="Rescale stiffness of invidual dimensions: -r factor dim [dim ...]. Can be repeated.")
+        help="Rescale stiffness of individual dimensions: -sr FACTOR DIM [DIM ...]. "
+             "Repeat the flag for different factors, e.g. -sr 2.0 0 -sr 5.0 3 4 "
+             "scales dim 0 by 2.0 and dims 3,4 by 5.0.")
+
+    parser.add_argument(
+        "--rescale_before_cg",
+        action="store_true",
+        default=False,
+        help="Apply the --stiff_resc rescaling to the base-pair-step stiffness BEFORE "
+             "coarse-graining (inside gen_params) instead of to the coarse-grained matrix "
+             "afterwards. Also applies when composite_size == 1. Because coarse-graining "
+             "mixes degrees of freedom, the two orders generally give different results. "
+             "Requires a PolyCG version that supports the 'dof_rescale' argument.")
     
     parser.add_argument(
         '-conf',
@@ -235,8 +252,16 @@ if __name__ == "__main__":
     ###################################################
     ########## Generate parameters ####################
     cgnap_setname = GEN_INPUT_CGNAP_SETNAME
+
+    # Parse the per-dimension stiffness rescaling up front so it can optionally be applied
+    # before coarse-graining (inside gen_params) instead of to the coarse-grained matrix.
+    scale = parse_rescaling(args.stiff_resc, parser=parser, ndim=6)
+    # Only forward dof_rescale when the user opts in, so existing runs keep working even
+    # before the PolyCG submodule is updated with the 'dof_rescale' parameter.
+    gen_params_kwargs = {'dof_rescale': scale} if args.rescale_before_cg else {}
+
     params = gen_params(
-        args.model, 
+        args.model,
         seq,
         composite_size=args.composite_size,
         closed=args.closed,
@@ -246,6 +271,7 @@ if __name__ == "__main__":
         allow_crop=allow_crop,
         cgnap_setname = cgnap_setname,
         verbose=True,
+        **gen_params_kwargs,
     )
     
     ###################################################
@@ -278,10 +304,30 @@ if __name__ == "__main__":
     
     ##################################################
     ########## Rescale stiffnesses ###################
-    scale = parse_rescaling(args.stiff_resc, ndim=6)    
-    for i in range(len(scale)):
-        if scale[i] != 1.0:
-            stiff = rescale_stiff(stiff,scale[i],entries=[i])
+    # When not applied before coarse-graining (see gen_params above), rescale the
+    # (possibly coarse-grained) stiffness matrix here.
+    if not args.rescale_before_cg:
+        for i in range(len(scale)):
+            if scale[i] != 1.0:
+                stiff = rescale_stiff(stiff,scale[i],entries=[i])
+
+    # print(type(stiff))
+    # print(stiff.shape)
+    # cov = np.linalg.inv(stiff.toarray())
+
+    # for i in range(len(cov)//6):
+    #     print(f'Base pair {i}:')
+    #     c0 = cov[i*6+0,i*6+0]
+    #     c1 = cov[i*6+1,i*6+1]
+    #     c2 = cov[i*6+2,i*6+2]
+    #     c3 = cov[i*6+3,i*6+3]
+    #     c4 = cov[i*6+4,i*6+4]
+    #     c5 = cov[i*6+5,i*6+5]
+    #     print(f' {1/c0:.3f} {1/c1:.3f} {1/c2:.3f} {1/c3:.3f} {1/c4:.3f} {1/c5:.3f}')
+
+    # # c5 = cov[20*6+5,20*6+5]
+    # # print(1./c5)
+    # sys.exit()
 
     ##################################################
     ########## Generate topology #####################

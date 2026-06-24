@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from ..SO3 import so3
 from ..evals.se3 import poses2junctions, junctions2parameters, junctions2dynamics
+from ..evals.stiffness import align_euler_angles, compute_groundstate_riemannian
 from .console_output import print_progress
 
 
@@ -749,6 +750,7 @@ class LoadCustom:
                 + "."
             )
         quats = self.select(quat_keys)
+        quats = so3.normalize_quats(quats)
         return so3.quats2mats(quats)
 
 
@@ -795,19 +797,47 @@ class LoadCustom:
             taus[:,:,3,3] = 1
             
         taus[..., :3, :3] = R
+        del R   # free (N, A, 3, 3) before returning
         taus[..., :3, 3] = pos
+        del pos  # free (N, A, 3) before returning
         return taus
     
-    def get_parameters(self, dynamic: bool = False) -> np.ndarray:
+    def get_parameters(
+        self, 
+        dynamic: bool = False, 
+        subtract_groundstate: bool = False,
+    ) -> np.ndarray:
+        
         junctions = poses2junctions(self.poses(unwrap=True, reduced=False))
         if dynamic:
-            return junctions2parameters(junctions2dynamics(junctions))
-        else:             
-            return junctions2parameters(junctions)
+            if subtract_groundstate:
+                params_raw  = junctions2parameters(junctions)
+                del junctions
+                params      = align_euler_angles(params_raw, known_gs=None)
+                del params_raw
+                mean_params = np.mean(params, axis=0)
+                dynamic_params = params - mean_params
+            else:
+                gs = compute_groundstate_riemannian(junctions, init_gs=None)
+                dynamic_junctions = junctions2dynamics(junctions, static_params=gs)
+                del junctions
+                dynamic_params = junctions2parameters(dynamic_junctions)
+            return dynamic_params
 
-    def get_mean_params(self) -> np.ndarray:
-        params = self.get_parameters(dynamic=False)
-        return np.mean(params, axis=0)
+        params = junctions2parameters(junctions)
+        del junctions
+        return align_euler_angles(params, known_gs=None)
+
+    def get_mean_params(self, subtract_groundstate: bool = False) -> np.ndarray:
+
+        junctions = poses2junctions(self.poses(unwrap=True, reduced=False))
+        if subtract_groundstate:
+            params      = align_euler_angles(junctions2parameters(junctions))
+            mean_params = np.mean(params, axis=0)
+        else:
+            mean_params = compute_groundstate_riemannian(junctions, init_gs=None)
+        del junctions
+        return mean_params
     
     
     

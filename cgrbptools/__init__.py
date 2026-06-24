@@ -12,7 +12,7 @@ from .core.conf_builder import ConfBuilder
 from .core.backmap import dna_backmap
 from .core.matrix_methods import matrix_copy, rescale_kth, rescale_stiff, is_positive_definite
 from .io.parse_custom import LoadCustom
-from .evals.stiffness import eval_gs_and_diagonal_stiffness, eval_gs_and_stiffness, diagonal_marginals
+from .evals.stiffness import eval_gs_and_diagonal_stiffness, eval_gs_and_stiffness, diagonal_marginals, align_euler_angles, plot_twist_alignment, compute_groundstate_riemannian
 from .evals.stiffness import dynamicparams2stiffness
 from .evals.stiffness import kullbackleibler_divergence, kullbackleibler_divergence_2, frobenius_difference, pearson_matrix_correlation
 from .evals.se3 import poses2junctions, junctions2parameters, poses2parameters, parameters2junctions, junctions2dynamics
