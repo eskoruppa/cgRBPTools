@@ -201,7 +201,6 @@ def rescale_stiff(
     return rescaled
 
 
-
 def is_positive_definite(A: ArrayLike, tol: float = 0.0) -> bool:
     """
     Check whether a matrix is (numerically) symmetric positive definite.
@@ -249,3 +248,71 @@ def is_positive_definite(A: ArrayLike, tol: float = 0.0) -> bool:
         return True
     except np.linalg.LinAlgError:
         return False
+
+
+def _apply_congruence(stiff: np.ndarray | spmatrix, d: np.ndarray) -> np.ndarray | spmatrix:
+    """Return ``D @ stiff @ D`` for the diagonal ``D = diag(d)``, preserving the input type."""
+    if sp.sparse.issparse(stiff):
+        fmt = getattr(stiff, "format", "csr") or "csr"
+        D = sp.sparse.diags(d, format=fmt)
+        return D @ stiff @ D
+    stiff = np.asarray(stiff)
+    return (d[:, None] * stiff) * d[None, :]
+
+def _check_matrix(stiff: np.ndarray | spmatrix, ndims: int) -> int:
+    """Validate that ``stiff`` is a square 2D matrix whose size is a multiple of ``ndims``."""
+    if not hasattr(stiff, "shape") or len(stiff.shape) != 2:
+        raise TypeError("stiff must be a 2D numpy array or a scipy sparse matrix.")
+    n, m = stiff.shape
+    if n != m:
+        raise ValueError(f"stiff must be square, got shape {stiff.shape}.")
+    if n == 0:
+        raise ValueError("stiff must be non-empty.")
+    if n % ndims != 0:
+        raise ValueError(f"stiff dimension must be a multiple of {ndims}, got {n}.")
+    return n
+
+def rescale_stiff_dofs(
+    stiff: np.ndarray | spmatrix,
+    factors: Sequence[float],
+    ndims: int = 6,
+) -> np.ndarray | spmatrix:
+    """
+    Rescale each degree of freedom by its own factor in a single congruence transform.
+
+    This is the per-DOF generalisation of :func:`rescale_stiff`: ``factors`` is a
+    length-``ndims`` vector giving an independent positive factor for each DOF.
+    Building the diagonal once and applying ``D K D`` a single time is more
+    efficient than rescaling DOFs one at a time.
+
+    Parameters
+    ----------
+    stiff : numpy.ndarray or scipy.sparse.spmatrix
+        Square stiffness matrix whose dimension is a multiple of ``ndims``.
+    factors : sequence of float
+        Length-``ndims`` vector of positive per-DOF rescaling factors. A factor of
+        1.0 leaves the corresponding DOF unchanged.
+    ndims : int, default=6
+        Number of degrees of freedom per site.
+
+    Returns
+    -------
+    numpy.ndarray or scipy.sparse.spmatrix
+        Rescaled stiffness matrix (same type as input).
+    """
+    factors = np.asarray(factors, dtype=float)
+    if factors.ndim != 1 or len(factors) != ndims:
+        raise ValueError(
+            f"factors must be a 1D sequence of length {ndims}, got shape {factors.shape}."
+        )
+    if not np.all(np.isfinite(factors)):
+        raise ValueError("all factors must be finite (not inf/NaN).")
+    if np.any(factors <= 0):
+        raise ValueError(f"all factors must be positive, got {factors}.")
+
+    n = _check_matrix(stiff, ndims)
+
+    d = np.ones(n, dtype=float)
+    for k in range(ndims):
+        d[k::ndims] = np.sqrt(factors[k])
+    return _apply_congruence(stiff, d)

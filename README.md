@@ -63,7 +63,7 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-seqfn`, `--sequence_file` | Path to DNA sequence file (`.seq` extension). Output filename derived from this if `-o` not specified. |
 | `-seq`, `--sequence` | DNA sequence as string (alternative to `-seqfn`). Requires `-o` to specify output filename. |
-| `-m`, `--model` | DNA model for parameter generation. Choices: `cgnaplus` (default), `md`, `crystall`. |
+| `-m`, `--model` | DNA model for parameter generation. Choices: `cgnaplus` (default), `md`, `crystal`. |
 | `-o`, `--output_basename` | Base filename for output files (required if using `-seq`). |
 
 ### Coarse-Graining Options
@@ -633,7 +633,7 @@ cgRBPtools supports three base pair step stiffness libraries through the PolyCG 
 |-------|-------------|
 | `cgnaplus` (default) | Most recent molecular dynamics derived elasticity database. Parameters are marginalized from the higher-order model that includes rigid bases and rigid phosphates. (Sharma et al. 2023) |
 | `md` | Parameters from MD simulations (Lankaš et al. 2003) |
-| `crystall` | Parameters from crystallographic data (Olson et al. 1998) |
+| `crystal` | Parameters from crystallographic data (Olson et al. 1998) |
 
 
 ---

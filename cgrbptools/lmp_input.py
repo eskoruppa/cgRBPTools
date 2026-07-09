@@ -66,7 +66,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '-m',       
         '--model',              
-        type=str, default = 'cgnaplus', choices=['cgnaplus','md','crystall'],
+        type=str, default = 'cgnaplus', choices=['cgnaplus','md','crystal'],
         help='DNA model for parameter generation (default: cgnaplus)')
     parser.add_argument(
         '-cg',      
@@ -218,7 +218,15 @@ if __name__ == "__main__":
         default = 0.0,
         help='Set excess linking number for configuration generation. (default: 0.0)') 
     args = parser.parse_args()
-    
+
+    ###################################################
+    ########## Print passed setup #####################
+    print('#' * 64)
+    print('# Passed setup:')
+    for key, value in sorted(vars(args).items()):
+        print(f'#   {key:<24} = {value}')
+    print('#' * 64)
+
     ##################################################################################################################
     # additional edits
     allow_crop      = not args.no_crop
