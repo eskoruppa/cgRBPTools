@@ -1280,7 +1280,7 @@ class CGRBPTopology:
                     extra_angle: np.ndarray | None = None,
                     extra_dihedral: np.ndarray | None = None,
                     subtract_groundstate: bool = False,
-                    validation: bool = False,
+                    # validation: bool = False,
                   ) -> None:
         """ 
             Set interaction parameters (groundstate, stiffness and coupling ranges)
@@ -1360,8 +1360,168 @@ class CGRBPTopology:
             self.extra_dihedral = extra_dihedral 
     
         self._init_couplings()
-        
-    
+
+
+    def homogeneous_params( self,
+                            groundstate: np.ndarray,
+                            local_stiffness: np.ndarray,
+                            nbps: int,
+                            nonlocal_couplings: dict[int, np.ndarray] | None = None,
+                            closed: bool | None = None,
+                            extra_bond: np.ndarray | None = None,
+                            extra_angle: np.ndarray | None = None,
+                            extra_dihedral: np.ndarray | None = None,
+                            subtract_groundstate: bool = False,
+                        ) -> None:
+        """Set interaction parameters for a homogeneous (translationally invariant) chain.
+
+        Convenience wrapper around :meth:`set_params` for chains whose elasticity is
+        identical at every junction. Instead of assembling the full
+        ``(6*nbps, 6*nbps)`` stiffness matrix by hand, the caller provides a single
+        local ``6x6`` stiffness block (used for every diagonal block) and, optionally,
+        a dictionary of nonlocal coupling blocks keyed by junction offset. The full
+        banded stiffness matrix is built internally and forwarded to
+        :meth:`set_params`.
+
+        Parameters
+        ----------
+        groundstate : np.ndarray
+            Equilibrium configuration. Either a full per-junction groundstate of
+            shape ``(nbps, 6)`` / ``(6*nbps,)``, or a single ``(6,)`` / ``(1, 6)``
+            vector that is tiled to all ``nbps`` junctions.
+        local_stiffness : np.ndarray
+            The local (offset-0) stiffness block placed on every diagonal block of
+            the stiffness matrix. Either a full ``(6, 6)`` matrix or a length-6
+            vector, in which case its entries are taken as the diagonal of an
+            otherwise-zero ``(6, 6)`` block.
+        nbps : int
+            Number of junctions. If ``groundstate`` is a single ``(6,)`` / ``(1, 6)``
+            vector it is tiled to this many junctions; if ``groundstate`` already
+            defines every junction, ``nbps`` must match its length.
+        nonlocal_couplings : dict[int, np.ndarray], optional
+            Mapping from junction offset ``k`` (``>= 1``) to the coupling block
+            between junction ``i`` and junction ``i+k``. The same block is used for
+            every ``i``. Each block is either a full ``(6, 6)`` matrix or a length-6
+            vector interpreted as a diagonal block (as for ``local_stiffness``).
+            Offset ``1`` produces angle couplings, offsets ``>= 2`` produce dihedral
+            couplings. The coupling range is inferred as the largest offset present
+            (``0`` if the dict is empty or None). The offset-0 block is the diagonal
+            and must be supplied via ``local_stiffness``, not here.
+        closed : bool, optional
+            Whether the chain is closed (ring). Forwarded to :meth:`set_params`;
+            also controls whether nonlocal couplings wrap around the ends. If None,
+            the current topology setting is used.
+        extra_bond, extra_angle, extra_dihedral : np.ndarray, optional
+            Additional per-type coefficients, forwarded to :meth:`set_params`.
+        subtract_groundstate : bool, optional
+            Forwarded to :meth:`set_params`. Default is False.
+
+        Raises
+        ------
+        ValueError
+            If array shapes are inconsistent, a coupling offset is out of range, or
+            ``nbps`` cannot be determined / does not match the groundstate.
+        TypeError
+            If ``nonlocal_couplings`` keys are not integers.
+        """
+        # --- normalize groundstate to (N, 6) ---
+        gs = np.asarray(groundstate, dtype=np.float64)
+        if gs.ndim == 1:
+            if gs.size == 0 or gs.size % 6 != 0:
+                raise ValueError("groundstate must be non-empty with a length that is a multiple of 6.")
+            gs = gs.reshape((gs.size // 6, 6))
+        elif gs.ndim == 2:
+            if gs.shape[1] != 6:
+                raise ValueError("Second dimension of groundstate needs to contain 6 entries.")
+        else:
+            raise ValueError("groundstate must be 1- or 2-dimensional.")
+
+        # --- resolve number of junctions, tiling a single vector if requested ---
+        if not isinstance(nbps, (int, np.integer)) or nbps < 1:
+            raise ValueError("nbps must be a positive integer.")
+        if gs.shape[0] == 1 and nbps > 1:
+            gs = np.tile(gs, (nbps, 1))
+        elif gs.shape[0] != nbps:
+            raise ValueError(
+                f"nbps ({nbps}) does not match the number of junctions in groundstate ({gs.shape[0]})."
+            )
+        N = gs.shape[0]
+
+        def _as_block(value, name: str) -> np.ndarray:
+            """Normalize a stiffness spec to a (6, 6) block.
+
+            Accepts either a full ``(6, 6)`` matrix, or a length-6 vector that is
+            interpreted as the diagonal of an otherwise-zero ``(6, 6)`` matrix.
+            """
+            arr = np.asarray(value, dtype=np.float64)
+            if arr.shape == (LMP_RBP_DIMS, LMP_RBP_DIMS):
+                return arr
+            if arr.shape == (LMP_RBP_DIMS,):
+                return np.diag(arr)
+            raise ValueError(
+                f"{name} must have shape ({LMP_RBP_DIMS}, {LMP_RBP_DIMS}) or "
+                f"({LMP_RBP_DIMS},) (diagonal entries)."
+            )
+
+        # --- validate local stiffness block ---
+        local = _as_block(local_stiffness, "local_stiffness")
+
+        # --- validate nonlocal coupling blocks ---
+        couplings: dict[int, np.ndarray] = {}
+        if nonlocal_couplings:
+            for key, block in nonlocal_couplings.items():
+                if not isinstance(key, (int, np.integer)):
+                    raise TypeError("nonlocal_couplings keys must be integer junction offsets.")
+                offset = int(key)
+                if offset < 1:
+                    raise ValueError(
+                        "nonlocal_couplings offsets must be >= 1; the offset-0 (diagonal) "
+                        "block is provided via local_stiffness."
+                    )
+                couplings[offset] = _as_block(block, f"nonlocal_couplings[{offset}]")
+
+        coupling_range = max(couplings) if couplings else 0
+        if coupling_range >= N:
+            raise ValueError(
+                f"Largest nonlocal coupling offset ({coupling_range}) must be smaller than "
+                f"the number of junctions ({N})."
+            )
+
+        # Whether couplings wrap around the ends must match what set_params will use.
+        is_closed = closed if closed is not None else self._closed
+
+        # --- assemble the banded stiffness matrix ---
+        dim = LMP_RBP_DIMS * N
+        M = sp.sparse.lil_matrix((dim, dim), dtype=np.float64)
+        for i in range(N):
+            a = LMP_RBP_DIMS * i
+            M[a:a + LMP_RBP_DIMS, a:a + LMP_RBP_DIMS] = local
+        for offset, block in couplings.items():
+            block_T = block.T
+            for i in range(N):
+                j = i + offset
+                if is_closed:
+                    j = j % N
+                elif j >= N:
+                    continue
+                a = LMP_RBP_DIMS * i
+                b = LMP_RBP_DIMS * j
+                M[a:a + LMP_RBP_DIMS, b:b + LMP_RBP_DIMS] = block
+                M[b:b + LMP_RBP_DIMS, a:a + LMP_RBP_DIMS] = block_T
+        M = M.tocsr()
+
+        self.set_params(
+            groundstate=gs,
+            stiffness_matrix=M,
+            coupling_range=coupling_range,
+            closed=closed,
+            extra_bond=extra_bond,
+            extra_angle=extra_angle,
+            extra_dihedral=extra_dihedral,
+            subtract_groundstate=subtract_groundstate,
+        )
+
+
     def _reconstruct_groundstate(self) -> np.ndarray:
         """
         Reconstruct the groundstate array from stored bond coefficients.
@@ -1834,21 +1994,25 @@ class CGRBPTopology:
         -------
         str
             Formatted sections for Bond Coeffs, Angle Coeffs, and Dihedral Coeffs.
-            Empty string if no coefficient types exist.
+            Sections with no coefficient types are omitted entirely; the empty
+            string is returned if no coefficient types exist at all.
         """
         lines = []
-        lines.append('\nBond Coeffs\n\n')
-        for bondtype in self.bondtypes:
-            lines.append(f'{bondtype.to_string(hybrid=hybrid)}\n')
-        lines.append('\n')
-        lines.append('\nAngle Coeffs\n\n')
-        for angletype in self.angletypes:
-            lines.append(f'{angletype.to_string(hybrid=hybrid)}\n')
-        lines.append('\n')
-        lines.append('\nDihedral Coeffs\n\n')
-        for dihedraltype in self.dihedraltypes:
-            lines.append(f'{dihedraltype.to_string(hybrid=hybrid)}\n')
-        lines.append('\n')
+        if len(self.bondtypes) > 0:
+            lines.append('\nBond Coeffs\n\n')
+            for bondtype in self.bondtypes:
+                lines.append(f'{bondtype.to_string(hybrid=hybrid)}\n')
+            lines.append('\n')
+        if len(self.angletypes) > 0:
+            lines.append('\nAngle Coeffs\n\n')
+            for angletype in self.angletypes:
+                lines.append(f'{angletype.to_string(hybrid=hybrid)}\n')
+            lines.append('\n')
+        if len(self.dihedraltypes) > 0:
+            lines.append('\nDihedral Coeffs\n\n')
+            for dihedraltype in self.dihedraltypes:
+                lines.append(f'{dihedraltype.to_string(hybrid=hybrid)}\n')
+            lines.append('\n')
         return ''.join(lines)
     
     @classmethod

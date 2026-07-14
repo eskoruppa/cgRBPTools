@@ -297,7 +297,7 @@ class CGRBPConf:
     def write_datafile(
         self,
         filename: str | Path,
-        topology: CGRBPTopology,
+        topology: CGRBPTopology = None,
         box: np.ndarray = None,
         hybrid: bool = False,
         include_coeffs: bool = False,
@@ -311,8 +311,10 @@ class CGRBPConf:
         ----------
         filename : str or Path
             Output file path.
-        topology : CGRBPTopology
-            CGRBP topology containing bonds, angles, dihedrals.
+        topology : CGRBPTopology, optional
+            CGRBP topology containing bonds, angles, dihedrals. If None
+            (default), the topology attached via set_topology() is used;
+            a RuntimeError is raised if none has been set.
         box : ndarray, optional
             Simulation box bounds with shape (3, 2), auto-calculated if None.
         hybrid : bool, optional
@@ -342,11 +344,18 @@ class CGRBPConf:
         OSError
             If file cannot be written.
         """
+        # Fall back to the attached topology if none was passed explicitly
+        if topology is None:
+            if not self.topology_set():
+                raise RuntimeError(
+                    "No topology provided and none attached; pass a topology "
+                    "argument or call set_topology() first."
+                )
+            topology = self.topology
+
         # Input validation
         if not isinstance(topology, CGRBPTopology):
             raise TypeError(f"topology must be CGRBPTopology, got {type(topology).__name__}")
-        if topology is None:
-            raise ValueError("topology cannot be None")
         
         # Validate consistency
         if self.nbp != len(self.positions):

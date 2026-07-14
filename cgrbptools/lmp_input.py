@@ -12,7 +12,6 @@ from .PolyCG.polycg import gen_params, load_sequence, write_seqfile
 from .core.topology import CGRBPTopology
 from .core.conf_builder import ConfBuilder
 from .core.matrix_methods import rescale_stiff
-# from .io.unit_conversion import RescaleUnits
 # from .io.backmap import dna_backmap
 
 GEN_INPUT_CGNAP_SETNAME = 'curves_plus'
@@ -304,13 +303,7 @@ if __name__ == "__main__":
     else: 
         stiff = params.stiffmat
         shape = params.shape_params
-        
-    # ##################################################
-    # ########## Rescale length units ##################
-    # if args.unit_length != 1.0:
-    #     rescale = RescaleUnits(length_factor=1./args.unit_length)
-    #     shape,stiff = rescale.rescale_model(shape,stiff)
-    
+            
     ##################################################
     ########## Rescale stiffnesses ###################
     # When not applied before coarse-graining (see gen_params above), rescale the
@@ -319,24 +312,6 @@ if __name__ == "__main__":
         for i in range(len(scale)):
             if scale[i] != 1.0:
                 stiff = rescale_stiff(stiff,scale[i],entries=[i])
-
-    # print(type(stiff))
-    # print(stiff.shape)
-    # cov = np.linalg.inv(stiff.toarray())
-
-    # for i in range(len(cov)//6):
-    #     print(f'Base pair {i}:')
-    #     c0 = cov[i*6+0,i*6+0]
-    #     c1 = cov[i*6+1,i*6+1]
-    #     c2 = cov[i*6+2,i*6+2]
-    #     c3 = cov[i*6+3,i*6+3]
-    #     c4 = cov[i*6+4,i*6+4]
-    #     c5 = cov[i*6+5,i*6+5]
-    #     print(f' {1/c0:.3f} {1/c1:.3f} {1/c2:.3f} {1/c3:.3f} {1/c4:.3f} {1/c5:.3f}')
-
-    # # c5 = cov[20*6+5,20*6+5]
-    # # print(1./c5)
-    # sys.exit()
 
     ##################################################
     ########## Generate topology #####################
