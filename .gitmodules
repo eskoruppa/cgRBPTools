@@ -4,3 +4,6 @@
 [submodule "cgrbptools/PolyCG"]
 	path = cgrbptools/PolyCG
 	url = https://github.com/eskoruppa/PolyCG
+[submodule "cgrbptools/evals/PyLk"]
+	path = cgrbptools/evals/PyLk
+	url = git@github.com:eskoruppa/PyLk
