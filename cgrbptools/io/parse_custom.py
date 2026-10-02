@@ -794,6 +794,7 @@ class LoadCustom:
             taus = np.empty((pos.shape[0], pos.shape[1], 3, 4), dtype=np.result_type(R, pos))
         else:
             taus = np.empty((pos.shape[0], pos.shape[1], 4, 4), dtype=np.result_type(R, pos))
+            taus[:,:,3,:3] = 0
             taus[:,:,3,3] = 1
             
         taus[..., :3, :3] = R

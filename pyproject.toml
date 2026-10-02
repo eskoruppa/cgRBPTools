@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=61", "wheel", "Cython>=3.0", "numpy>=2.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,6 +15,7 @@ dependencies = [
     "numba>=0.57",
     "scipy>=1.10",
     "matplotlib>=3.6",
+    "threadpoolctl>=3.1",
 ]
 
 [project.urls]

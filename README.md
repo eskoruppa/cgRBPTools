@@ -30,7 +30,7 @@ pip install .        # standard install
 pip install -e .     # editable install
 ```
 
-Dependencies (NumPy, SciPy, Numba, Matplotlib) are installed automatically. Python 3.9 or higher is required.
+Dependencies (NumPy, SciPy, Numba, Matplotlib, threadpoolctl) are installed automatically. Python 3.9 or higher is required.
 
 ## Quick Start
 
@@ -88,7 +88,7 @@ python -m cgrbptools.lmp_input [options]
 | `-sid`, `--start_id` | Starting base pair index for subsection generation (default: 0). |
 | `-eid`, `--end_id` | Ending base pair index for subsection generation (default: full sequence). |
 | `-nc`, `--no_crop` | Disable automatic sequence cropping for boundary conditions. |
-| `-np`, `--no_partial` | Disable partial block assembly for stiffness matrix computation. |
+| `-nopart`, `--no_partial` | Disable partial block assembly for stiffness matrix computation. |
 
 ### Unit Scaling
 
@@ -96,8 +96,8 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-ul`, `--unit_length` | Set unit length in nm. Rescales parameters to chosen scale. E.g., `-ul 3.4` rescales all lengths by 1/3.4 (default: 1.0 nm). |
 | `-ue`, `--unit_energy` | Set unit energy in kT. Rescales parameters to chosen scale (default: 1.0 kT). |
-| `-sr`, `--stiff_resc` | Rescale stiffness of individual degrees of freedom: `-sr FACTOR DIM [DIM ...]`. Dimensions are indexed `0..5` (rotational `0,1,2`; translational `3,4,5`). The flag can be repeated for different factors, e.g. `-sr 2.0 0 -sr 5.0 3 4`. |
-| `-rbcg`, `--rescale_before_cg` | Apply the `-sr` rescaling to the base-pair-step stiffness **before** coarse-graining (inside `gen_params`) instead of to the coarse-grained matrix afterwards. Also applies when `-cg 1`. Because coarse-graining mixes degrees of freedom, the two orders generally give different results. Requires a PolyCG version that supports the `dof_rescale` argument (default: off, i.e. rescale after coarse-graining). |
+| `-sr`, `--stiff_resc` | Rescale stiffness of individual degrees of freedom: `-sr FACTOR DIM [DIM ...]`. Dimensions are indexed `0..5` (rotational `0,1,2`; translational `3,4,5`). The flag can be repeated for different factors, e.g. `-sr 2.0 0 -sr 5.0 3 4`. When used, the rescaling command is recorded in a `.rescale` file (see [Output Files](#rescaling-file-rescale)). |
+| `-racg`, `--rescale_after_cg` | Apply the `-sr` rescaling to the coarse-grained stiffness matrix **after** coarse-graining instead of to the base-pair-step stiffness beforehand (inside `gen_params`), which is the default. Because coarse-graining mixes degrees of freedom, the two orders generally give different results. The default (before coarse-graining) requires a PolyCG version that supports the `dof_rescale` argument (default: off, i.e. rescale before coarse-graining). |
 
 ### Configuration Generation
 
@@ -119,6 +119,28 @@ python -m cgrbptools.lmp_input [options]
 | `-bpst`, `--include_bps_triads` | Include base pair step triads in visualization (requires `-vis`). |
 | `-coeffs`, `--safe_coeffs` | Save stiffness matrix and shape to file. |
 
+### Performance Options
+
+| Option | Description |
+|--------|-------------|
+| `-np`, `--num_procs` | Limit the number of threads used by NumPy/SciPy (BLAS, OpenMP) to this value. If omitted, the thread pools are left at their library defaults. Useful when running many jobs in parallel on a shared node, where oversubscription slows everything down. |
+
+The limit is applied at runtime via [threadpoolctl](https://github.com/joblib/threadpoolctl) to the
+already-loaded BLAS/OpenMP pools, and the corresponding `*_NUM_THREADS` environment variables
+(`OMP`, `OPENBLAS`, `MKL`, `VECLIB_MAXIMUM`, `NUMEXPR`) are exported so that subprocesses inherit
+the same limit. Setting the environment variables inside the script alone would have no effect,
+since BLAS libraries read them only when they are loaded, which happens on import.
+
+`threadpoolctl` is imported lazily and is therefore only required when `-np` is actually used. It
+is installed automatically with the package; in an environment created before it became a
+dependency, install it with `pip install threadpoolctl`. Without the package, `-np` aborts with an
+explanatory error. The equivalent without any dependency is to set the variables before starting
+python:
+
+```bash
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 python -m cgrbptools.lmp_input -seqfn Examples/200bp -conf gs
+```
+
 ### Example Commands
 
 ```bash
@@ -137,8 +159,11 @@ python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -ul 0.34 -conf gs
 # Selectively rescale twist stiffness (dimension 2) on the coarse-grained matrix
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -sr 0.5 2 -conf gs
 
-# Same rescaling, but applied to the base-pair-step stiffness before coarse-graining
-python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -sr 0.5 2 -rbcg -conf gs
+# Same rescaling, but applied to the coarse-grained stiffness after coarse-graining
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -sr 0.5 2 -racg -conf gs
+
+# Restrict NumPy/SciPy to a single thread (e.g. when running many jobs in parallel)
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -np 1 -conf gs
 ```
 
 ---
@@ -307,6 +332,26 @@ Standard LAMMPS data file containing:
 
 Plain text file containing the DNA sequence (one continuous string of A, T, C, G characters).
 
+### Rescaling File (`.rescale`)
+
+Written **only** when per-dimension stiffness rescaling was requested via `-sr`/`--stiff_resc`.
+It shares the basename of all other output files and contains a single line holding the
+rescaling command as it was passed on the command line, so that the applied rescaling can be
+recovered (or replayed) later. For example, the invocation
+
+```bash
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -sr 0.5 0 1 -sr 0.71 2 -sr 0.5 5
+```
+
+produces `Examples/200bp.rescale` containing
+
+```
+-sr 0.5 0 1 -sr 0.71 2 -sr 0.5 5
+```
+
+Note that `-racg`/`--rescale_after_cg` is not recorded in this file, although it changes how the
+listed factors were applied.
+
 ---
 
 ## Core Classes
@@ -453,7 +498,7 @@ When `-ue VALUE` is specified:
   a new energy unit equal to `VALUE` kT)
 - **Example**: `-ue 0.592` expresses energies in units of 0.592 kT (≈ kcal/mol at 300 K)
 
-### Per-Dimension Stiffness Rescaling (`-sr` / `-rbcg`)
+### Per-Dimension Stiffness Rescaling (`-sr` / `-racg`)
 
 In addition to the unit rescaling above, individual stiffness degrees of freedom can be
 rescaled with `-sr FACTOR DIM [DIM ...]` (repeatable). Dimensions are indexed `0..5`
@@ -463,13 +508,16 @@ scale by `sqrt(FACTOR)`.
 
 The order relative to coarse-graining matters:
 
-- **Default (after coarse-graining)**: the rescaling is applied to the coarse-grained
-  stiffness matrix.
-- **`-rbcg` (before coarse-graining)**: the rescaling is forwarded to `gen_params` as
+- **Default (before coarse-graining)**: the rescaling is forwarded to `gen_params` as
   `dof_rescale` and applied to the base-pair-step stiffness before coarse-graining (this
-  also takes effect when `-cg 1`). Because coarse-graining mixes degrees of freedom, the
-  two orders generally yield different coarse-grained stiffness matrices. This requires a
-  PolyCG version that supports the `dof_rescale` argument.
+  also takes effect when `-cg 1`). This requires a PolyCG version that supports the
+  `dof_rescale` argument.
+- **`-racg` (after coarse-graining)**: the rescaling is instead applied to the
+  coarse-grained stiffness matrix. Because coarse-graining mixes degrees of freedom, the
+  two orders generally yield different coarse-grained stiffness matrices.
+
+Whenever `-sr` is given, the rescaling command is also written to a `.rescale` file alongside the
+other output files, see [Rescaling File](#rescaling-file-rescale).
 
 ### Accessing Original Units
 

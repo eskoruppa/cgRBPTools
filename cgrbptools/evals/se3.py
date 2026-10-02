@@ -14,7 +14,7 @@ _EULER_EPSILON    = 1e-12
 _EULER_SERIES_SMALL = 1e-4
 
 
-def poses2junctions(poses: np.ndarray, optimized: bool = True) -> np.ndarray:
+def poses2junctions(poses: np.ndarray, closed: bool = False, optimized: bool = True) -> np.ndarray:
     """Convert a sequence of SE3 poses to junctions.
 
     Parameters
@@ -22,24 +22,32 @@ def poses2junctions(poses: np.ndarray, optimized: bool = True) -> np.ndarray:
     poses : np.ndarray, shape (*batch, n_poses, 4, 4)
         SE3 pose matrices.  *batch may be empty (single snapshot) or contain
         any number of leading dimensions (e.g. multiple simulations).
+    closed : bool, default False
+        If True, treat the chain as topologically closed: an additional
+        junction connecting the last pose back to the first is appended,
+        yielding n_poses junctions instead of n_poses-1.
     optimized : bool, default True
         If True, delegates to poses2junctions_optimized (vectorised NumPy).
 
     Returns
     -------
-    np.ndarray, shape (*batch, n_poses-1, 4, 4)
+    np.ndarray, shape (*batch, n_junc, 4, 4)
+        n_junc == n_poses if closed else n_poses-1.
     """
     if optimized:
-        return poses2junctions_optimized(poses)
+        return poses2junctions_optimized(poses, closed=closed)
     batch_shape = poses.shape[:-3]
     n_poses     = poses.shape[-3]
     flat        = poses.reshape(-1, n_poses, 4, 4)
     N           = flat.shape[0]
-    out         = np.zeros((N, n_poses - 1, 4, 4))
+    n_junc      = n_poses if closed else n_poses - 1
+    out         = np.zeros((N, n_junc, 4, 4))
     for i in range(N):
         for j in range(n_poses - 1):
             out[i, j] = so3.se3_inverse(flat[i, j]) @ flat[i, j + 1]
-    return out.reshape(batch_shape + (n_poses - 1, 4, 4))
+        if closed:
+            out[i, n_poses - 1] = so3.se3_inverse(flat[i, n_poses - 1]) @ flat[i, 0]
+    return out.reshape(batch_shape + (n_junc, 4, 4))
 
 
 def junctions2parameters(junctions: np.ndarray, optimized: bool = True) -> np.ndarray:
@@ -68,31 +76,40 @@ def junctions2parameters(junctions: np.ndarray, optimized: bool = True) -> np.nd
     return out.reshape(batch_shape + (n_junc, 6))
 
 
-def poses2parameters(poses: np.ndarray, optimized: bool = True) -> np.ndarray:
+def poses2parameters(poses: np.ndarray, closed: bool = False, optimized: bool = True) -> np.ndarray:
     """Convert a sequence of SE3 poses to SE3 parameters.
 
     Parameters
     ----------
     poses : np.ndarray, shape (*batch, n_poses, 4, 4)
+    closed : bool, default False
+        If True, treat the chain as topologically closed: an additional
+        parameter set for the junction connecting the last pose back to the
+        first is appended, yielding n_poses parameters instead of n_poses-1.
     optimized : bool, default True
         If True, delegates to poses2parameters_optimized (numba JIT).
 
     Returns
     -------
-    np.ndarray, shape (*batch, n_poses-1, 6)
+    np.ndarray, shape (*batch, n_junc, 6)
+        n_junc == n_poses if closed else n_poses-1.
     """
     if optimized:
-        return poses2parameters_optimized(poses)
+        return poses2parameters_optimized(poses, closed=closed)
     batch_shape = poses.shape[:-3]
     n_poses     = poses.shape[-3]
     flat        = poses.reshape(-1, n_poses, 4, 4)
     N           = flat.shape[0]
-    out         = np.zeros((N, n_poses - 1, 6))
+    n_junc      = n_poses if closed else n_poses - 1
+    out         = np.zeros((N, n_junc, 6))
     for i in range(N):
         for j in range(n_poses - 1):
             gij = so3.se3_inverse(flat[i, j]) @ flat[i, j + 1]
             out[i, j] = so3.se3_rotmat2euler(gij)
-    return out.reshape(batch_shape + (n_poses - 1, 6))
+        if closed:
+            gij = so3.se3_inverse(flat[i, n_poses - 1]) @ flat[i, 0]
+            out[i, n_poses - 1] = so3.se3_rotmat2euler(gij)
+    return out.reshape(batch_shape + (n_junc, 6))
 
 
 def parameters2junctions(params: np.ndarray, optimized: bool = True) -> np.ndarray:
@@ -162,53 +179,41 @@ def junctions2dynamics(junctions: np.ndarray, static_junctions: np.ndarray | Non
     return out.reshape(batch_shape + (n_junc, 4, 4))
 
 
-##########################################################################################################
-# Optimised variants
-# ==================
-#
-# Approach chosen per function:
-#
-#   poses2junctions      → pure NumPy (batch matmul via np.matmul / np.einsum)
-#                          Wins over numba: no branching, BLAS-backed batch 4×4 ops.
-#
-#   junctions2parameters → @cond_jit kernel (_junctions2parameters_kernel) on flat
-#   poses2parameters     →   (N, n_element, ...) + Python wrapper for reshape.
-#                          Wins over numpy: rotmat2euler has complex branching
-#                          (near-identity / near-π cases) that cannot be vectorised
-#                          cleanly.  The kernel turns Python→JIT calls into cheap
-#                          JIT→JIT calls.
-#
-#   parameters2junctions → pure NumPy (vectorised Rodrigues formula)
-#                          Wins over numba: euler2rotmat is branchless in the main
-#                          path; np.where handles the two special cases at no cost.
-#
-#   junctions2dynamics   → pure NumPy (broadcast subtraction, trivially optimal)
-##########################################################################################################
-
-
-def poses2junctions_optimized(poses: np.ndarray) -> np.ndarray:
+def poses2junctions_optimized(poses: np.ndarray, closed: bool = False) -> np.ndarray:
     """Vectorised version of poses2junctions.  Accepts arbitrary leading batch dims.
 
     Parameters
     ----------
     poses : np.ndarray, shape (*batch, n_poses, 4, 4)
+    closed : bool, default False
+        If True, treat the chain as topologically closed (append the
+        last-to-first junction), yielding n_poses junctions instead of
+        n_poses-1.
 
     Returns
     -------
-    np.ndarray, shape (*batch, n_poses-1, 4, 4)
+    np.ndarray, shape (*batch, n_junc, 4, 4)
+        n_junc == n_poses if closed else n_poses-1.
     """
     batch_shape = poses.shape[:-3]
     n_poses     = poses.shape[-3]
     flat        = poses.reshape(-1, n_poses, 4, 4)   # (N, n_poses, 4, 4)
 
-    R      = flat[:, :-1, :3, :3]   # (N, P-1, 3, 3)
-    t      = flat[:, :-1, :3,  3]   # (N, P-1, 3)
-    R_next = flat[:, 1:,  :3, :3]   # (N, P-1, 3, 3)
-    t_next = flat[:, 1:,  :3,  3]   # (N, P-1, 3)
-    Rt     = R.swapaxes(-1, -2)     # batch R^T
+    if closed:
+        cur = flat                       # (N, n_poses, 4, 4)
+        nxt = np.roll(flat, -1, axis=1)  # next pose, wrapping last -> first
+    else:
+        cur = flat[:, :-1]               # (N, n_poses-1, 4, 4)
+        nxt = flat[:, 1:]
+
+    R      = cur[:, :, :3, :3]   # (N, n_junc, 3, 3)
+    t      = cur[:, :, :3,  3]   # (N, n_junc, 3)
+    R_next = nxt[:, :, :3, :3]   # (N, n_junc, 3, 3)
+    t_next = nxt[:, :, :3,  3]   # (N, n_junc, 3)
+    Rt     = R.swapaxes(-1, -2)  # batch R^T
 
     N      = flat.shape[0]
-    n_junc = n_poses - 1
+    n_junc = n_poses if closed else n_poses - 1
     junctions = np.zeros((N, n_junc, 4, 4))
     junctions[:, :, :3, :3] = np.matmul(Rt, R_next)
     junctions[:, :, :3,  3] = np.einsum('...ij,...j->...i', Rt, t_next - t)
@@ -249,19 +254,27 @@ def junctions2parameters_optimized(junctions: np.ndarray) -> np.ndarray:
 
 
 @cond_jit(nopython=True, cache=True)
-def _poses2parameters_kernel(flat: np.ndarray) -> np.ndarray:
-    """JIT kernel: flat input (N, n_poses, 4, 4) → (N, n_poses-1, 6)."""
+def _poses2parameters_kernel(flat: np.ndarray, closed: bool) -> np.ndarray:
+    """JIT kernel: flat input (N, n_poses, 4, 4) → (N, n_junc, 6).
+
+    n_junc == n_poses if closed else n_poses-1.  When closed, the wrap-around
+    junction (last pose → first pose) is appended.
+    """
     N       = flat.shape[0]
     n_poses = flat.shape[1]
-    out     = np.zeros((N, n_poses - 1, 6))
+    n_junc  = n_poses if closed else n_poses - 1
+    out     = np.zeros((N, n_junc, 6))
     for i in range(N):
         for j in range(n_poses - 1):
             gij = _se3_inverse(flat[i, j]) @ flat[i, j + 1]
             out[i, j] = _se3_rotmat2euler(gij)
+        if closed:
+            gij = _se3_inverse(flat[i, n_poses - 1]) @ flat[i, 0]
+            out[i, n_poses - 1] = _se3_rotmat2euler(gij)
     return out
 
 
-def poses2parameters_optimized(poses: np.ndarray) -> np.ndarray:
+def poses2parameters_optimized(poses: np.ndarray, closed: bool = False) -> np.ndarray:
     """Numba-JIT version of poses2parameters.  Accepts arbitrary leading batch dims.
 
     Same rationale as junctions2parameters_optimized: numba beats numpy
@@ -270,15 +283,21 @@ def poses2parameters_optimized(poses: np.ndarray) -> np.ndarray:
     Parameters
     ----------
     poses : np.ndarray, shape (*batch, n_poses, 4, 4)
+    closed : bool, default False
+        If True, treat the chain as topologically closed (append the
+        last-to-first junction), yielding n_poses parameters instead of
+        n_poses-1.
 
     Returns
     -------
-    np.ndarray, shape (*batch, n_poses-1, 6)
+    np.ndarray, shape (*batch, n_junc, 6)
+        n_junc == n_poses if closed else n_poses-1.
     """
     batch_shape = poses.shape[:-3]
     n_poses     = poses.shape[-3]
-    out = _poses2parameters_kernel(poses.reshape(-1, n_poses, 4, 4))
-    return out.reshape(batch_shape + (n_poses - 1, 6))
+    n_junc      = n_poses if closed else n_poses - 1
+    out = _poses2parameters_kernel(poses.reshape(-1, n_poses, 4, 4), closed)
+    return out.reshape(batch_shape + (n_junc, 6))
 
 
 def _batch_euler2rotmat(vrot: np.ndarray) -> np.ndarray:
