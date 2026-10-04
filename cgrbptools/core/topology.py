@@ -1130,7 +1130,7 @@ class CGRBPTopology:
         if self.couplings_set:
             rescale_factor = self.unit_energy / unit_energy
             if rescale_factor != 1.0:
-                rescale = RescaleUnits(energy_factor=rescale_factor)
+                rescale = RescaleUnits(length_factor=1.0, energy_factor=rescale_factor)
                 self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
                 self._init_couplings()
         self.unit_energy = unit_energy
