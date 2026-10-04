@@ -17,6 +17,7 @@ def spline_interpolate_constant_arclength_segments(
     composite_size: int,
     k: int = 3,
     s_smooth: float = 0.0,
+    periodic: bool = False,
 ) -> np.ndarray:
     """
     Interpolate a 3D curve through pts using a spline and resample so that
@@ -36,6 +37,9 @@ def spline_interpolate_constant_arclength_segments(
         Spline degree (3=cubic). Requires N > k.
     s_smooth : float
         Smoothing factor for splprep. 0.0 interpolates exactly.
+    periodic : bool
+        Fit a closed (periodic) spline. pts[-1] must repeat pts[0]; tangent and
+        curvature then match where the curve closes.
 
     Returns
     -------
@@ -52,6 +56,8 @@ def spline_interpolate_constant_arclength_segments(
         return pts.copy()
     if N <= k:
         raise ValueError(f"Need N > k for splprep. Got N={N}, k={k}")
+    if periodic and not np.allclose(pts[0], pts[-1]):
+        raise ValueError("periodic interpolation requires pts[-1] == pts[0]")
 
     x, y, z = pts[:, 0], pts[:, 1], pts[:, 2]
 
@@ -61,7 +67,7 @@ def spline_interpolate_constant_arclength_segments(
     t = t / t[-1] if t[-1] > 0 else t
 
     # Fit spline (interpolating if s_smooth=0)
-    tck, u_pts = splprep([x, y, z], u=t, s=s_smooth, k=k)
+    tck, u_pts = splprep([x, y, z], u=t, s=s_smooth, k=k, per=int(periodic))
 
     # Build dense map u -> s(u) (spline arc length approx)
     n_dense = max(5000, 100 * N)
@@ -224,6 +230,8 @@ def dna_backmap(
         add_pose[:3,:3] = add_pose[:3,:3] @ R.T
         return np.concatenate((add_pose[None], poses), axis=0)
 
+    # True only if the curve returns to the first pose; the spline is then fitted periodically
+    loop_closed = False
     if _closed:
         if verbose:
             print(" Backmapping closed configuration")
@@ -233,6 +241,7 @@ def dna_backmap(
             if verbose:
                 print(f' First and last pose are within {dist:.2f} nm, closing the loop.')
             cg_poses = np.concatenate((conf_poses, conf_poses[0][None]), axis=0)
+            loop_closed = True
         else:
             if verbose:
                 print(" First and last pose are not within closure distance, extending along last tangent.")
@@ -267,17 +276,13 @@ def dna_backmap(
     if spline_interpolation:
         if verbose:
             print(" Using spline interpolation for backmapping.")
-        curve = spline_interpolate_constant_arclength_segments(pts, composite_size)
+        curve = spline_interpolate_constant_arclength_segments(pts, composite_size, periodic=loop_closed)
     else:
         if verbose:
             print(" Using linear interpolation for backmapping.")    
         curve = linear_interpolate_constant_arclength_segments(pts, composite_size)
         
-    poses = np.zeros((len(curve),4,4)) 
-    if closed:
-        poses[-1] = poses[0]
-    if not _closed:
-        poses[-1] = conf_poses[-1]
+    poses = np.zeros((len(curve),4,4))
     nsteps = len(pts)-1
 
     def _project_to_plane(R: np.ndarray):

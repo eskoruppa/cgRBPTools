@@ -9,6 +9,10 @@
 **test*
 **Test*/
 **TEST*/
+# except the test suite
+!/tests/
+!/tests/**
+/tests/**/__pycache__/
 
 # ignore data directories
 **Data/
