@@ -32,6 +32,12 @@ pip install -e .     # editable install
 
 Dependencies (NumPy, SciPy, Numba, Matplotlib, threadpoolctl) are installed automatically. Python 3.9 or higher is required.
 
+The tests (requiring pytest) are run from the repository root with
+
+```bash
+python -m pytest
+```
+
 ## Quick Start
 
 Generate LAMMPS input files for a 200 bp DNA sequence:
@@ -79,7 +85,7 @@ python -m cgrbptools.lmp_input [options]
 | Option | Description |
 |--------|-------------|
 | `-closed` | Generate closed (circular) topology with periodic boundary couplings. |
-| `-fene K Rc R0` | Include FENE bond potential with parameters K (spring constant), Rc (cutoff), R0 (equilibrium length). |
+| `-fene K Rc R0` | Include the FENE term of bond style `rbpfene`: stiffness K, onset distance Rc (the term acts on bonds longer than Rc) and maximum bond length R0. The values are in simulation units: they are **not** rescaled by `-ul`. |
 
 ### Subsection Selection
 
@@ -87,7 +93,7 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-sid`, `--start_id` | Starting base pair index for subsection generation (default: 0). |
 | `-eid`, `--end_id` | Ending base pair index for subsection generation (default: full sequence). |
-| `-nc`, `--no_crop` | Disable automatic sequence cropping for boundary conditions. |
+| `-nc`, `--no_crop` | Disable automatic sequence cropping for boundary conditions. The sequence then has to end on a bead (its length minus one, minus cg//2 with `-centered`, must be a multiple of `-cg`); otherwise lmp_input stops with an error stating how many base pairs to remove. |
 | `-nopart`, `--no_partial` | Disable partial block assembly for stiffness matrix computation. |
 
 ### Unit Scaling
@@ -103,9 +109,68 @@ python -m cgrbptools.lmp_input [options]
 
 | Option | Description |
 |--------|-------------|
-| `-conf`, `--configuration_method` | Configuration type: `straight`/`str`, `circular`/`circ`, `ground_state`/`gs`. If omitted, no configuration (`.data`) file is written. |
-| `-dlk`, `--excess_link` | Excess linking number applied when building the configuration (default: 0.0). |
+| `-conf`, `--configuration_method` | Configuration type: `straight`/`str`, `circular`/`circ`, `ground_state`/`gs`. If neither `-conf` nor `-conffn` is given, no configuration (`.data`) file is written. |
+| `-conffn`, `--configuration_file` | Import an externally generated configuration instead of building one (see [Importing a Configuration](#importing-a-configuration)). Mutually exclusive with `-conf`. |
+| `-dlk`, `--excess_link` | Excess linking number. For `-conf straight`/`circular` the excess link of the generated configuration (default: 0). For imported closed configurations, see [Linking number](#linking-number). No effect for `-conf ground_state` and imported open configurations (a warning is printed). |
 | `-mass` | Mass of atoms in output (default: 1.0). |
+
+### Importing a Configuration
+
+Instead of building a configuration, an externally generated one can be imported with `-conffn`.
+Only `-conffn` is needed (plus `--conf_frame` for trajectories); the other options cover special
+cases and are rejected without `-conffn`.
+
+| Option | Description |
+|--------|-------------|
+| `-conffn`, `--configuration_file` | `.npy` file with SE(3) poses as an `(N, 4, 4)` array or an `(T, N, 4, 4)` trajectory, or `.npz` file with either `poses`, or `positions` `(N, 3)` and `triads` `(N, 3, 3)` (with a leading `T` axis for trajectories). |
+| `--conf_frame` | Snapshot of a trajectory (0-based; `-1` selects the last one). Required for trajectories. |
+| `--conf_units` | Length unit of the positions: `nm` (default), `angstrom`, or `sim` for multiples of the unit length set with `-ul`. Positions are converted to the unit length of the simulation. |
+| `-trunc`, `--truncate_to_match` | If the number of poses does not match the sequence, truncate the longer of the two at its end (open topologies only). |
+| `--conf_resolution` | `auto` (default), `bp` or `cg`. Only needed with `-trunc` if the number of poses matches neither resolution. |
+| `--force_orthogonalize` | Repair rotation blocks deviating from orthonormality by more than 1e-4 instead of stopping (smaller deviations are always repaired). |
+| `--strict_conf_check` | Treat the warnings of the plausibility checks as errors. |
+
+**Pose format.** Each pose is a 4x4 matrix with the triad in the upper-left 3x3 block (the triad
+vectors are its *columns*, the third one pointing along the chain) and the position in the last
+column; the last row is `[0, 0, 0, 1]`. This is the format of `CGRBPConf.poses` and of the
+`<output>_conf.npy` file written by an import, which can be imported again without further options.
+
+**Resolution.** The configuration is given either at *bead resolution* (one pose per coarse-grained
+bead) or at *base-pair resolution* (one pose per base pair of the sequence). Base-pair-resolution
+configurations are coarse-grained by keeping the frames of the beads, i.e. base pairs *k*·cg (*k*·cg
++ cg//2 with `-centered`), exactly as the elastic parameters are coarse-grained. The resolution is
+deduced from the number of poses: an open sequence of L bp yields (L−1−c)//cg + 1 beads (c = cg//2
+with `-centered`, else 0), a closed one L/cg. Bead-resolution configurations used with `-centered`
+have to hold the frames of the base pairs *k*·cg + cg//2.
+
+**Matching.** The number of poses has to match the sequence (after `-sid`/`-eid` were applied).
+Otherwise lmp_input stops and reports the expected and the provided number of poses. For open
+topologies `-trunc` truncates the longer of the two at its end:
+- a longer configuration is cut to the poses required by the sequence;
+- a longer sequence is cut to the beads covered by the configuration, keeping the block of the last
+  bead complete (with `-nc` the sequence ends on the last bead). The sequence-dependent parameters
+  near the new end change, since the molecule now ends there.
+
+Closed configurations have to match exactly. A closed configuration that repeats its first pose at
+the end has the repeated pose removed (with a warning).
+
+**Checks.** Before any file is written, the imported configuration is checked:
+- rotation blocks have to be proper rotations; deviations from orthonormality up to 1e-4 are repaired;
+- bond lengths have to agree with the model (to catch wrong length units or resolutions), the chain
+  has to follow the third triad axis, and closed configurations have to be closed;
+- with `-fene`, bonds stretched into the regime in which LAMMPS aborts are rejected;
+- the elastic energy is evaluated with the Hamiltonian that is simulated (deformations and stiffness
+  as the `rbp` styles evaluate them, limited to the coupling range). The total energy is compared
+  with its equilibrium distribution, and each junction with its marginal equilibrium distribution.
+  Strongly deformed junctions are reported as warnings (errors with `--strict_conf_check`).
+
+#### Linking number
+
+For imported closed configurations the linking number Lk = Lk0 + ΔTw + Wr is reported, where Lk0 is
+the relaxed linking number of the sequence. If `-dlk` is given, full turns of twist are added
+uniformly (each triad is rotated about its own third axis) such that the linking number becomes
+round(Lk0 + dlk), the same convention as `-conf circular`. Without `-dlk` the configuration keeps its
+linking number.
 
 ### Output Options
 
@@ -150,8 +215,14 @@ python -m cgrbptools.lmp_input -seqfn Examples/1kbp -conf gs
 # Coarse-grain to 5 bp resolution with extended coupling range
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 5 -cr 2 -conf gs
 
-# Generate circular DNA with FENE bonds
-python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 200 1.1 1.35 -conf circ
+# Generate circular DNA with FENE bonds (FENE parameters in units of 3.4 nm, the length of a bead)
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 200 1.1 1.35 -ul 3.4 -conf circ
+
+# Import a configuration (bead or base-pair resolution, positions in nm)
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -conffn my_conf.npy
+
+# Import the last snapshot of a trajectory into a closed ring with 2 turns of excess link
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -conffn traj.npy --conf_frame -1 -dlk 2
 
 # Rescale to simulation units (length in units of 0.34 nm)
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -ul 0.34 -conf gs
@@ -332,6 +403,14 @@ Standard LAMMPS data file containing:
 
 Plain text file containing the DNA sequence (one continuous string of A, T, C, G characters).
 
+### Imported Configuration (`_conf.npy`)
+
+Written only for imported configurations (`-conffn`): the configuration as written to the `.data`
+file, i.e. after matching, coarse-graining and linking-number adjustment, as an `(N, 4, 4)` array of
+poses at bead resolution with positions in nm. It can be imported again without further options.
+If it is the file that was imported, it is left untouched when its content is unchanged; otherwise
+the original is first renamed with the suffix `_#1` (`_#2`, ...).
+
 ### Rescaling File (`.rescale`)
 
 Written **only** when per-dimension stiffness rescaling was requested via `-sr`/`--stiff_resc`.
@@ -460,7 +539,13 @@ conf = ConfBuilder.build(topology, conf_type='straight', mass=1.0)
 conf = ConfBuilder.straight(topology, excess_link=0, mass=1.0)
 conf = ConfBuilder.circular(topology, excess_link=0, mass=1.0)
 conf = ConfBuilder.ground_state(topology, mass=1.0)
+
+# Import an external configuration (bead or base-pair resolution, positions in nm)
+conf = ConfBuilder.from_file(topology, 'my_conf.npy', conf_units='nm')
 ```
+
+The functions behind the import (loading, validation, matching, checks) are in
+`cgrbptools.core.conf_import` and `cgrbptools.core.conf_checks`.
 
 #### Configuration Types
 

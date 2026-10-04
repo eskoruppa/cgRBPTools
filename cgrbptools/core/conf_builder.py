@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from ..SO3 import so3
 from .topology import CGRBPTopology
 from .configuration import CGRBPConf
+from .conf_import import (
+    ConfigurationMismatchError,
+    load_poses,
+    positions_to_nm,
+    remove_repeated_pose,
+    validate_poses,
+)
 
 class ConfBuilder:
     
@@ -441,6 +450,7 @@ class ConfBuilder:
         poses: np.ndarray,
         topology: CGRBPTopology | None = None,
         mass: float = 1,
+        validate: bool = False,
     ) -> CGRBPConf:
         """
         Create a DNA configuration from SE3 poses (transformation matrices).
@@ -461,12 +471,15 @@ class ConfBuilder:
             match topology.nbp. Default is None.
         mass : float, optional
             Mass of each base pair. Must be positive. Default is 1.
-        
+        validate : bool, optional
+            Check that the poses are SE(3) elements (see conf_import.validate_poses) and
+            re-orthonormalize rotation blocks with small deviations. Default is False.
+
         Returns
         -------
         CGRBPConf
             Configuration object containing the provided poses and mass.
-        
+
         Raises
         ------
         TypeError
@@ -474,11 +487,13 @@ class ConfBuilder:
         ValueError
             If poses shape is invalid, mass <= 0, nbp <= 0, or number of poses
             doesn't match topology.nbp when topology is provided.
-        
+        ConfigurationValidationError
+            If validate is set and the poses are not valid SE(3) elements.
+
         Notes
         -----
-        - No validation is performed on whether rotation matrices are orthogonal
-        - Bottom row of SE3 matrices is not validated
+        - Without validate, neither the orthogonality of the rotation matrices nor the
+          bottom row of the SE3 matrices is validated
         - If topology is provided, it will be attached to the configuration
         """
         # Validate poses
@@ -494,11 +509,11 @@ class ConfBuilder:
         nbp = poses.shape[0]
         if nbp <= 0:
             raise ValueError(f"Number of poses must be positive, got {nbp}")
-        
+
         # Validate mass
         if not isinstance(mass, (int, float)) or mass <= 0:
             raise ValueError(f"mass must be a positive number, got {mass}")
-        
+
         # Validate topology if provided
         if topology is not None:
             if not isinstance(topology, CGRBPTopology):
@@ -507,11 +522,83 @@ class ConfBuilder:
                 raise ValueError(
                     f"Number of poses ({nbp}) does not match topology.nbp ({topology.nbp})"
                 )
-        
+
+        if validate:
+            poses, _ = validate_poses(poses)
+
         conf = CGRBPConf(poses, mass)
         if topology is not None:
             conf.set_topology(topology)
         return conf
+
+    @classmethod
+    def from_file(
+        cls,
+        topology: CGRBPTopology,
+        source: str | Path | np.ndarray,
+        frame: int | None = None,
+        mass: float = 1,
+        conf_units: str = 'nm',
+        force_orthogonalize: bool = False,
+    ) -> CGRBPConf:
+        """
+        Create a configuration from an external configuration (file or array).
+
+        The configuration is loaded (see conf_import.load_poses), converted to the length unit
+        of the topology, validated, and matched to the beads of the topology. It may be given at
+        bead resolution (topology.nbp poses) or at base-pair resolution (one pose per base pair
+        of the topology's sequence), in which case the frames of the beads are retained. A
+        closed configuration that repeats its first pose at the end has the repeated pose
+        removed. The number of poses has to match exactly; truncation is only available in
+        lmp_input, where the sequence can still be adapted.
+
+        Parameters
+        ----------
+        topology : CGRBPTopology
+            Topology with parameters and sequence set.
+        source : str, Path or np.ndarray
+            Configuration array or path to a .npy or .npz file.
+        frame : int, optional
+            Snapshot to select if the source holds a trajectory (-1 selects the last one).
+        mass : float, optional
+            Mass of each bead. Default is 1.
+        conf_units : str, optional
+            Length unit of the positions: 'nm' (default), 'angstrom' or 'sim' (multiples of
+            topology.unit_length).
+        force_orthogonalize : bool, optional
+            Re-orthonormalize rotation blocks that deviate by more than the tolerance.
+
+        Returns
+        -------
+        CGRBPConf
+            Configuration with positions in the length unit of the topology.
+
+        Raises
+        ------
+        ConfigurationError
+            If the configuration cannot be loaded, is invalid or does not match the topology.
+        """
+        if not isinstance(topology, CGRBPTopology):
+            raise TypeError(f"topology must be a CGRBPTopology instance, got {type(topology)}")
+        name = f"Configuration file '{source}'" if not isinstance(source, np.ndarray) else 'The configuration array'
+        poses = positions_to_nm(load_poses(source, frame=frame), conf_units, topology.unit_length)
+        poses, _ = validate_poses(poses, force_orthogonalize=force_orthogonalize, name=name)
+        if topology.closed:
+            poses, _ = remove_repeated_pose(poses, name=name)
+
+        sequence = topology.sequence
+        if len(poses) != topology.nbp:
+            cg = topology.composite_size if topology.seqs_set else 1
+            if sequence is None or cg == 1 or len(poses) != len(sequence):
+                raise ConfigurationMismatchError(
+                    f'Configuration mismatch: {name[0].lower() + name[1:]} contains {len(poses)} '
+                    f'poses, but the topology requires {topology.nbp} poses at bead resolution'
+                    + (f' or {len(sequence)} poses at base-pair resolution.' if sequence and cg > 1 else '.')
+                )
+            poses = poses[topology.center_pos::cg][:topology.nbp]
+
+        poses[:, :3, 3] /= topology.unit_length
+        return cls.from_poses(poses, topology, mass=mass)
     
     @classmethod
     def from_positions_orientations(

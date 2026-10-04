@@ -12,6 +12,20 @@ from .PolyCG.polycg import gen_params, load_sequence, write_seqfile
 
 from .core.topology import CGRBPTopology
 from .core.conf_builder import ConfBuilder
+from .core.conf_import import (
+    CONF_ORTHO_TOL,
+    CONF_RESOLUTIONS,
+    CONF_UNITS,
+    ConfigurationValidationError,
+    load_poses,
+    match_sequence_and_poses,
+    num_cropped_bp,
+    positions_to_nm,
+    remove_repeated_pose,
+    validate_poses,
+    write_poses,
+)
+from .core.conf_checks import adjust_excess_link, check_fene, check_geometry, energy_check
 from .core.matrix_methods import rescale_stiff
 # from .io.backmap import dna_backmap
 
@@ -252,7 +266,8 @@ if __name__ == "__main__":
              "The default (rescaling before coarse-graining) requires a PolyCG version that "
              "supports the 'dof_rescale' argument.")
     
-    parser.add_argument(
+    conf_source = parser.add_mutually_exclusive_group()
+    conf_source.add_argument(
         '-conf',
         "--configuration_method",
         type=lambda s: s.strip().lower(),
@@ -264,12 +279,71 @@ if __name__ == "__main__":
             + ". Defaults to None."
         ),
         )
+    conf_source.add_argument(
+        '-conffn',
+        '--configuration_file',
+        type=str,
+        default=None,
+        help="Import an externally generated configuration instead of building one (-conf). "
+             "Accepted are a .npy file holding SE(3) poses as an (N, 4, 4) array (triad vectors as "
+             "the columns of the upper-left 3x3 block, position in the last column) or as a "
+             "(T, N, 4, 4) trajectory (select the snapshot with --conf_frame), or a .npz file "
+             "holding either 'poses' or 'positions' (N, 3) and 'triads' (N, 3, 3). The configuration "
+             "is given at bead resolution (one pose per coarse-grained bead, at base pair "
+             "k*cg (+ cg//2 with -centered)) or at base-pair resolution (one pose per base pair; "
+             "the frames of the beads are retained). The resolution is deduced from the number of "
+             "poses, which has to match the sequence (see -trunc). Positions are expected in nm "
+             "(see --conf_units). The processed configuration is written to <output>_conf.npy.")
     parser.add_argument(
-        '-dlk', 
-        '--excess_link', 
-        type=float, 
-        default = 0.0,
-        help='Set excess linking number for configuration generation. (default: 0.0)')
+        '--conf_frame',
+        type=int,
+        default=None,
+        help='Snapshot of the trajectory given with -conffn (0-based, -1 selects the last '
+             'snapshot). Required if the file holds a trajectory.')
+    parser.add_argument(
+        '--conf_units',
+        choices=CONF_UNITS,
+        default=None,
+        help='Length unit of the positions of the -conffn configuration: nm (default), angstrom, '
+             'or sim for simulation units, i.e. multiples of the unit length set with -ul. The '
+             'positions are converted to the unit length of the simulation (-ul).')
+    parser.add_argument(
+        '--conf_resolution',
+        choices=CONF_RESOLUTIONS,
+        default=None,
+        help='Resolution of the -conffn configuration: bp (one pose per base pair), cg (one pose '
+             'per bead) or auto (default), deduced from the number of poses. Only required with '
+             '-trunc if the number of poses matches neither.')
+    parser.add_argument(
+        '-trunc',
+        '--truncate_to_match',
+        action='store_true',
+        help='If the number of poses of the -conffn configuration does not match the sequence, '
+             'truncate the longer of the two (sequence or configuration) at its end to match the '
+             'shorter one. A truncated sequence changes the parameters near its new end, since '
+             'the molecule ends there. Only for open topologies.')
+    parser.add_argument(
+        '--force_orthogonalize',
+        action='store_true',
+        help=f'Replace rotation blocks of the -conffn configuration that deviate from '
+             f'orthonormality by more than {CONF_ORTHO_TOL:g} by the closest rotation matrices '
+             f'instead of stopping with an error. Smaller deviations are always repaired.')
+    parser.add_argument(
+        '--strict_conf_check',
+        action='store_true',
+        help='Treat the warnings of the checks of the -conffn configuration (geometry, FENE, '
+             'elastic energy, linking number) as errors.')
+    parser.add_argument(
+        '-dlk',
+        '--excess_link',
+        type=float,
+        default = None,
+        help='Excess linking number. -conf straight/circular: excess link of the generated '
+             'configuration (default: 0). Imported closed configurations (-conffn): if given, '
+             'full turns of twist are added uniformly such that the linking number becomes '
+             'round(Lk0 + dlk), with Lk0 the relaxed linking number, as for -conf circular; if '
+             'omitted, the configuration keeps its linking number. No effect for -conf '
+             'ground_state and for imported open configurations.')
 
     parser.add_argument(
         '-be',
@@ -290,6 +364,31 @@ if __name__ == "__main__":
         help='Limit the number of threads used by numpy/scipy (BLAS, OpenMP). '
              'If not set, the thread pools are left at their defaults.')
     args = parser.parse_args()
+
+    ##################################################
+    ########## Check configuration import flags ######
+    # These flags only apply to an imported configuration. Passing them without -conffn
+    # most likely means that -conffn was forgotten.
+    conf_import_flags = {
+        '--conf_frame': args.conf_frame is not None,
+        '--conf_units': args.conf_units is not None,
+        '--conf_resolution': args.conf_resolution is not None,
+        '-trunc/--truncate_to_match': args.truncate_to_match,
+        '--force_orthogonalize': args.force_orthogonalize,
+        '--strict_conf_check': args.strict_conf_check,
+    }
+    if args.configuration_file is None:
+        orphaned = [flag for flag, given in conf_import_flags.items() if given]
+        if orphaned:
+            parser.error(
+                f'{", ".join(orphaned)} {"applies" if len(orphaned) == 1 else "apply"} only to an '
+                f'imported configuration (-conffn/--configuration_file).'
+            )
+    elif args.truncate_to_match and args.closed:
+        parser.error(
+            '-trunc/--truncate_to_match is not available for closed topologies (-closed). Closed '
+            'configurations have to match the sequence exactly.'
+        )
 
     ##################################################
     ########## Limit number of threads ###############
@@ -331,7 +430,7 @@ if __name__ == "__main__":
       
     ###################################################
     ########## Crop sequence ##########################
-    
+    uncropped_seq_len = len(seq)
     if args.end_id is not None:
         seq = seq[args.start_id:args.end_id]
     else:
@@ -349,6 +448,48 @@ if __name__ == "__main__":
     center_offset = 0
     if args.centered and args.composite_size > 1:
         center_offset = args.composite_size // 2
+
+    ###################################################
+    ########## Import configuration ###################
+    # The configuration is loaded and matched to the sequence before the parameters are
+    # generated, since -trunc may shorten the sequence. Positions are handled in nm here.
+    conf_match = None
+    if args.configuration_file is not None:
+        conf_name = f"Configuration file '{args.configuration_file}'"
+        imported = load_poses(args.configuration_file, frame=args.conf_frame)
+        num_imported = len(imported)
+        imported = positions_to_nm(imported, args.conf_units or 'nm', args.unit_length)
+        imported, note = validate_poses(
+            imported, force_orthogonalize=args.force_orthogonalize, name=conf_name
+        )
+        if note is not None:
+            print(f'Note: {note}')
+        if args.closed:
+            imported, note = remove_repeated_pose(imported, name=conf_name)
+            if note is not None:
+                print(f'Warning: {note}', file=sys.stderr)
+        conf_match = match_sequence_and_poses(
+            seq,
+            imported,
+            args.composite_size,
+            closed=args.closed,
+            center_offset=center_offset,
+            allow_crop=allow_crop,
+            resolution=args.conf_resolution or 'auto',
+            truncate=args.truncate_to_match,
+            uncropped_seq_len=uncropped_seq_len,
+            name=conf_name,
+        )
+        seq = conf_match.sequence
+        frame_str = f' (frame {args.conf_frame})' if args.conf_frame is not None else ''
+        resolution_str = 'base-pair' if conf_match.resolution == 'bp' else 'bead'
+        print(
+            f'Imported configuration: {num_imported} poses from {args.configuration_file}{frame_str} '
+            f'at {resolution_str} resolution -> {len(conf_match.bead_poses)} beads'
+        )
+        for note in conf_match.notes:
+            print(f'Note: {note}')
+
     gen_seq = seq
     if center_offset > 0:
         if args.closed:
@@ -366,6 +507,21 @@ if __name__ == "__main__":
                 )
             start_id = center_offset
         print(f'Centered coarse-graining: bead k is base pair k*{args.composite_size} + {center_offset}')
+
+    ###################################################
+    ########## No cropping ############################
+    # With -nc the sequence has to end on a bead. Checked here, since parameter generation
+    # would otherwise fail with an uninformative message.
+    if args.no_crop and not args.closed:
+        cropped = num_cropped_bp(len(seq), args.composite_size, center_offset=center_offset)
+        if cropped > 0:
+            first_bead = f' (first bead at base pair {center_offset})' if center_offset else ''
+            raise ValueError(
+                f'-nc/--no_crop is set, but the sequence would have to be cropped: with {len(seq)} bp '
+                f'at composite size {args.composite_size}{first_bead}, the last {cropped} base pair(s) '
+                f'do not complete a composite step. Remove them, extend the sequence by '
+                f'{args.composite_size - cropped} base pair(s), or drop -nc.'
+            )
 
     ###################################################
     ########## Generate parameters ####################
@@ -438,23 +594,75 @@ if __name__ == "__main__":
     # topol.set_coupling_range(2)
     # topol.set_closed(closed)
     
-    ##################################################
-    ########## Write topology ########################
     topol.set_sequence(seq,chars_per_atom=args.composite_size,centered=args.centered)
-    topol.write_database(base_fn,add_extension=True)
 
     ##################################################
     ########## Build configuration ###################
+    # The configuration is built and checked before any file is written.
     box_extension = args.box_extend
+    excess_link = 0.0 if args.excess_link is None else args.excess_link
 
     conf = None
-    gen_conf = args.configuration_method is not None
-    if gen_conf:
+    bp_poses_nm = None
+    if conf_match is not None:
+        # positions are converted from nm to simulation units
+        bead_poses = conf_match.bead_poses.copy()
+        bead_poses[:, :3, 3] /= topol.unit_length
+        bp_poses_nm = conf_match.bp_poses
+
+        conf_warnings = check_geometry(
+            conf_match.bead_poses, topol.get_groundstate(length_rescaled=False), closed=args.closed
+        )
+        if args.closed:
+            # the base-pair groundstate restores the full turns of the coarse-grained twist
+            adjusted, lines, warns = adjust_excess_link(
+                bead_poses, topol, excess_link=args.excess_link, bp_groundstate=params.shape_params
+            )
+            for line in lines:
+                print(line)
+            conf_warnings += warns
+            if not np.array_equal(adjusted, bead_poses):
+                # the original base-pair poses do not carry the added twist
+                bp_poses_nm = None
+            bead_poses = adjusted
+        elif args.excess_link is not None:
+            print('Warning: -dlk/--excess_link has no effect for an imported open configuration.', file=sys.stderr)
+        if include_fene:
+            conf_warnings += check_fene(bead_poses, topol.fene_Rc, topol.fene_R0, closed=args.closed)
+        lines, warns = energy_check(bead_poses, topol)
+        for line in lines:
+            print(line)
+        conf_warnings += warns
+
+        sys.stdout.flush()
+        for warning in conf_warnings:
+            print(f'Warning: {warning}', file=sys.stderr)
+        if args.strict_conf_check and conf_warnings:
+            raise ConfigurationValidationError(
+                f'{len(conf_warnings)} check(s) of the imported configuration failed (--strict_conf_check):\n'
+                + '\n'.join(f'  - {warning}' for warning in conf_warnings)
+            )
+        conf = ConfBuilder.from_poses(bead_poses, topol, mass=args.mass)
+
+    elif args.configuration_method is not None:
         conf_method_key = args.configuration_method
         print(f"Generating configuration using method: {ConfBuilder.mapping_dict()[conf_method_key]} (input: {conf_method_key})")
-        conf = ConfBuilder.build(topol, conf_method_key, mass=args.mass, excess_link=args.excess_link)
+        if args.excess_link is not None and ConfBuilder.mapping_dict()[conf_method_key] == 'ground_state':
+            print('Warning: -dlk/--excess_link has no effect for -conf ground_state.', file=sys.stderr)
+        conf = ConfBuilder.build(topol, conf_method_key, mass=args.mass, excess_link=excess_link)
+        if include_fene:
+            for warning in check_fene(conf.poses, topol.fene_Rc, topol.fene_R0, closed=args.closed, abort_is_error=False):
+                print(f'Warning: {warning}', file=sys.stderr)
+
+    ##################################################
+    ########## Write topology ########################
+    topol.write_database(base_fn,add_extension=True)
+
+    ##################################################
+    ########## Write configuration ###################
+    if conf is not None:
         box = conf.extended_bounds(box_extension,square_box=True)
-    
+
         conf.write_datafile(
             base_fn,
             topol,
@@ -464,22 +672,28 @@ if __name__ == "__main__":
             add_extension = True,
             box_decimals = args.decimals,
             overwrite = True,
-        )  
-    
+        )
+    if conf_match is not None:
+        print(write_poses(
+            base_fn.with_name(base_fn.name + '_conf.npy'),
+            conf.poses_in_nm(),
+            input_file=args.configuration_file,
+        ))
+
     ##################################################
     ########## Visualizations ########################
-    if conf is None:   
-        conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
-    
+    if conf is None:
+        conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=excess_link)
+
     ##################################################
-    ########## Generate ChimeraX script ##############    
+    ########## Generate ChimeraX script ##############
     if args.visualize_cgrbp:
-        conf.visualize_chimerax(base_fn, include_bps_triads=args.include_bps_triads)
-    
+        conf.visualize_chimerax(base_fn, include_bps_triads=args.include_bps_triads, bp_poses=bp_poses_nm)
+
     ##################################################
     ########## Generate PDB ##########################
     if args.gen_pdb and not args.visualize_cgrbp:
-        conf.visualize_pdb(base_fn)
+        conf.visualize_pdb(base_fn, bp_poses=bp_poses_nm)
      
     ##################################################
     ########## Generate XYZ ##########################

@@ -425,15 +425,16 @@ class CGRBPConf:
         return filepath
     
     def visualize_chimerax(
-        self, 
-        base_fn: str | Path, 
+        self,
+        base_fn: str | Path,
         include_bps_triads: bool = True,
         include_beads: bool = True,
         bead_radius: float | None = None,
+        bp_poses: np.ndarray | None = None,
         ) -> None:
-        
+
         """Visualize configuration in ChimeraX.
-        
+
         Parameters
         ----------
         base_fn : str or Path
@@ -442,16 +443,17 @@ class CGRBPConf:
             Radius of beads for visualization. If None, no beads are drawn.
         include_beads : bool, optional
             Whether to include beads in the visualization. Default is True.
+        bp_poses : np.ndarray, optional
+            Base-pair poses in nm with shape (len(sequence), 4, 4), e.g. of a configuration
+            imported at base-pair resolution. If None (default), the base pairs are obtained by
+            backmapping the beads.
         """
-        
-        
+
+
         if self.topology is None:
             raise RuntimeError("Topology must be set via set_topology() before visualization.")
-        
-        if self.topology.composite_size > 1:
-            bp_poses = dna_backmap(self,verbose=False)
-        else:
-            bp_poses = self.poses_in_nm()
+
+        bp_poses = self._bp_poses_for_visualization(bp_poses)
         
         if include_beads:
             if bead_radius is None:
@@ -474,31 +476,46 @@ class CGRBPConf:
         
     def visualize_pdb(
         self,
-        base_fn: str | Path,   
+        base_fn: str | Path,
+        bp_poses: np.ndarray | None = None,
     ) -> None:
         """Visualize configuration as PDB file.
-        
+
         Parameters
         ----------
         base_fn : str or Path
             Output PDB file path.
+        bp_poses : np.ndarray, optional
+            Base-pair poses in nm with shape (len(sequence), 4, 4). If None (default), the base
+            pairs are obtained by backmapping the beads.
         """
         if self.topology is None:
             raise RuntimeError("Topology must be set via set_topology() before visualization.")
 
-        if self.topology.composite_size > 1:
-            bp_poses = dna_backmap(self,verbose=False)
-        else:
-            bp_poses = self.poses_in_nm()
+        bp_poses = self._bp_poses_for_visualization(bp_poses)
         visualize_pdb(
             base_fn, 
             self.topology.sequence, 
             poses=bp_poses
         )
         
+    def _bp_poses_for_visualization(self, bp_poses: np.ndarray | None) -> np.ndarray:
+        """Base-pair poses in nm: the given ones (checked against the sequence) or backmapped ones."""
+        if bp_poses is not None:
+            nseq = len(self.topology.sequence)
+            if np.shape(bp_poses) != (nseq, 4, 4):
+                raise ValueError(
+                    f"bp_poses must have shape ({nseq}, 4, 4) (one pose per base pair of the "
+                    f"sequence), got {np.shape(bp_poses)}"
+                )
+            return np.asarray(bp_poses)
+        if self.topology.composite_size > 1:
+            return dna_backmap(self,verbose=False)
+        return self.poses_in_nm()
+
     def visualize_xyz(
         self,
-        base_fn: str | Path,   
+        base_fn: str | Path,
     ) -> None:
         """Visualize configuration as XYZ file.
         
