@@ -72,7 +72,7 @@ python -m cgrbptools.lmp_input [options]
 |--------|-------------|
 | `-cg`, `--composite_size` | Number of base pairs per coarse-grained bead (default: 1 for all-atom). |
 | `-cr`, `--coupling_range` | Range of beyond-nearest-neighbor interactions. Set to 0 for local couplings only (default: 1). |
-| `-centered` | Place retained triads at the center of coarse-grained blocks. |
+| `-centered` | Place retained triads at the center of coarse-grained blocks: bead *k* is base pair *k*·cg + cg//2 instead of *k*·cg. The coarse-grained parameters are generated for these frames (open: coarse-graining starts cg//2 base pairs in; closed: the sequence is cyclically shifted by cg//2 for parameter generation). For open chains the last block must contain its center base pair. |
 
 ### Topology Options
 
@@ -279,7 +279,7 @@ Dihedral Coeffs
 | `bond/angle/dihedral style` | LAMMPS interaction style (`rbp` or `rbpfene`) |
 | `subtract groundstate` | Whether groundstate is subtracted in potential (0=no) |
 | `seqs set` | Whether sequence information is included (1=yes, 0=no) |
-| `seqs centered` | Whether triads are centered in coarse-grained blocks |
+| `seqs centered` | Whether triads are centered in coarse-grained blocks (bead *k* is base pair *k*·cg + cg//2) |
 | `chars per atom` | Number of base pairs per coarse-grained bead (composite size) |
 | `closed` | Whether topology is circular (1=yes, 0=no) |
 | `unit length` | Length unit in nm |
@@ -564,7 +564,8 @@ bp_poses = dna_backmap(
     verbose=True
 )
 
-# bp_poses shape: (nbp * composite_size, 4, 4)
+# bp_poses shape: (len(sequence), 4, 4); bp_poses[i] is base pair i of the sequence.
+# For centered topologies bead k sits at base pair k*composite_size + composite_size//2.
 ```
 
 The backmapped poses maintain SE3 structure and can be used with visualization tools:

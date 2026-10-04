@@ -146,7 +146,10 @@ if __name__ == "__main__":
         '-centered',  
         '--centered',             
         action='store_true',
-        help='Place retained triads at the center of coarse-grained blocks.') 
+        help='Place retained triads at the center of coarse-grained blocks: bead k is base pair '
+             'k*cg + cg//2 instead of k*cg. The coarse-grained parameters are generated for these '
+             'frames (open: coarse-graining starts cg//2 base pairs in; closed: the sequence is '
+             'cyclically shifted by cg//2 for parameter generation).')
         
     parser.add_argument(
         '-fene',
@@ -335,7 +338,35 @@ if __name__ == "__main__":
         seq = seq[args.start_id:]
     start_id = 0
     end_id = None
-        
+
+    ###################################################
+    ########## Centering ##############################
+    # With -centered the retained triad of bead k is base pair k*cg + cg//2 (the center of
+    # its sequence block) instead of k*cg. The parameters have to be generated for these
+    # frames: for open chains the coarse-graining starts cg//2 base-pair steps in, for closed
+    # chains the parameters are generated for the sequence cyclically shifted by cg//2. The
+    # topology keeps the unshifted sequence, so that each bead is assigned its own block.
+    center_offset = 0
+    if args.centered and args.composite_size > 1:
+        center_offset = args.composite_size // 2
+    gen_seq = seq
+    if center_offset > 0:
+        if args.closed:
+            gen_seq = seq[center_offset:] + seq[:center_offset]
+        else:
+            # The last block needs to contain its center base pair to hold a bead
+            last_block_len = len(seq) % args.composite_size
+            if 0 < last_block_len <= center_offset:
+                parser.error(
+                    f'Sequence of length {len(seq)} cannot be centered at composite size '
+                    f'{args.composite_size}: the last block contains {last_block_len} base pair(s), '
+                    f'which does not reach its center position {center_offset}. Remove the last '
+                    f'{last_block_len} base pair(s) or extend the sequence by at least '
+                    f'{center_offset + 1 - last_block_len}.'
+                )
+            start_id = center_offset
+        print(f'Centered coarse-graining: bead k is base pair k*{args.composite_size} + {center_offset}')
+
     ###################################################
     ########## Generate parameters ####################
     cgnap_setname = GEN_INPUT_CGNAP_SETNAME
@@ -345,7 +376,7 @@ if __name__ == "__main__":
 
     params = gen_params(
         args.model,
-        seq,
+        gen_seq,
         composite_size=args.composite_size,
         closed=args.closed,
         start_id=start_id,
@@ -495,8 +526,10 @@ if __name__ == "__main__":
 
     ##################################################
     ########## Write sequence file ###################
+    # Write the full sequence rather than params.sequence, which is cropped (open) or
+    # cyclically shifted (closed) if the parameters were generated for centered beads.
     seqfn = base_fn.with_suffix('.seq')
-    write_seqfile(seqfn,params.sequence,add_extension=True)
+    write_seqfile(seqfn,seq,add_extension=True)
 
     ##################################################
     ########## Write rescaling file ##################

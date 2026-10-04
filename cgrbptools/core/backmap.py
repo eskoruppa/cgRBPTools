@@ -165,8 +165,14 @@ def dna_backmap(
     closed: bool | None = None,
     verbose: bool = False,
     ) -> np.ndarray:
-    """Backmap coarse-grained rigid base pair configuration to base pair step configuration."""
-    
+    """Backmap coarse-grained rigid base pair configuration to base pair step configuration.
+
+    The returned poses are indexed by base pair: poses[i] is base pair i of the topology's
+    sequence. Atom k is placed at base pair k*composite_size + topology.center_pos, i.e.
+    centered topologies are taken into account. For open chains, base pairs before the first
+    and after the last atom are reconstructed by extrapolating along the terminal tangents.
+    """
+
     if not conf.topology_set():
         raise ValueError("CGRBPConf must have a topology set for backmapping.")
     topology = conf.topology
@@ -191,6 +197,9 @@ def dna_backmap(
     if closed is not None:
         _closed = closed
 
+    # base pair index of the first atom (non-zero for centered sequences)
+    first_bp = getattr(topology, 'center_pos', 0) if topology is not None else 0
+
     def _avg_discretization(poses: np.ndarray) -> float:
         total_dist = 0.0
         nsteps = len(poses) - 1
@@ -205,6 +214,15 @@ def dna_backmap(
         R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
         add_pose[:3,:3] = add_pose[:3,:3] @ R
         return np.concatenate((poses, add_pose[None]), axis=0)
+
+    def _prepend_single_pose(poses: np.ndarray, composite_size: int) -> np.ndarray:
+        # mirror of _append_single_pose: the step from the added pose to poses[0] equals the appended step
+        avg_disc = _avg_discretization(poses)
+        add_pose = poses[0].copy()
+        add_pose[:3,3] -= add_pose[:3,2] * avg_disc
+        R = so3.euler2rotmat((0.0, 0.0, CGRBP_BACKMAP_CLOSURE_OPEN_ADD_ROT*composite_size))
+        add_pose[:3,:3] = add_pose[:3,:3] @ R.T
+        return np.concatenate((add_pose[None], poses), axis=0)
 
     if _closed:
         if verbose:
@@ -228,7 +246,7 @@ def dna_backmap(
     else:  
         if verbose:
             print(" Backmapping open configuration")
-        if (len(conf_poses)-1)*composite_size + 1 == len(topology.sequence):
+        if first_bp + (len(conf_poses)-1)*composite_size + 1 == len(topology.sequence):
             cg_poses = conf_poses.copy()
         else:
             if verbose: 
@@ -240,6 +258,10 @@ def dna_backmap(
             # add_pose[:3,:3] = add_pose[:3,:3] @ R
             # cg_poses = np.concatenate((conf_poses, add_pose[None]), axis=0)
             cg_poses = _append_single_pose(conf_poses, composite_size)
+        if first_bp > 0:
+            if verbose:
+                print(" Extending first pose to cover the base pairs before the first (centered) atom.")
+            cg_poses = _prepend_single_pose(cg_poses, composite_size)
     pts = cg_poses[:, :3, 3].copy()
     
     if spline_interpolation:
@@ -308,6 +330,11 @@ def dna_backmap(
         
     if _closed:
         poses = poses[:-1]
+        # poses[0] is atom 0, i.e. base pair first_bp: rotate such that index i is base pair i
+        if first_bp > 0:
+            poses = np.roll(poses, first_bp, axis=0)
     else:
-        poses = poses[:len(topology.sequence)]
+        # skip the base pairs of the prepended pose's segment that precede base pair 0
+        lead = composite_size - first_bp if first_bp > 0 else 0
+        poses = poses[lead:lead+len(topology.sequence)]
     return poses

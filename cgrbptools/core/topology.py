@@ -1793,8 +1793,15 @@ class CGRBPTopology:
         centered : bool, optional
             Whether the sequences are considered centered. Center positions is chars_per_atom // 2.
             Default is False.
+
+        Notes
+        -----
+        If centered, the triad of atom k is base pair k*chars_per_atom + chars_per_atom//2
+        of the global sequence. The parameters passed to set_params have to be generated
+        for these frames, i.e. coarse-grained starting at base pair chars_per_atom//2
+        (open) or for the sequence cyclically shifted by chars_per_atom//2 (closed).
         """
-        
+
         if not self.couplings_set:
             raise ValueError("Couplings need to be set before sequence assignment.")
 
@@ -1834,13 +1841,6 @@ class CGRBPTopology:
                 min_seq_len = (self.nbp-1) * self.chars_per_atom + center_pos + 1
                 raise ValueError(f'Sequence for atom {self.nbp} is too short to be centered. With {self.nbp} atoms the sequence has to contain at least {min_seq_len} characters ({len("".join(seqs))} character sequence provided).')
 
-            if self.closed:
-                err_msg = 'Centering is not supported for closed topologies. Consider shifting the sequence.'
-                if len(''.join(seqs)) <= 200:
-                    err_msg += f'\nCurrent sequence: {"".join(seqs)}'
-                    err_msg += f'\nShifted sequence: {"".join(seqs)[center_pos:] + "".join(seqs)[:center_pos]}'
-                raise ValueError(err_msg)
-
         self.seqs_centered = centered
         self.center_pos = center_pos
         self.atom_seqs = list(seqs)
@@ -1870,7 +1870,7 @@ class CGRBPTopology:
             Number of characters per atom (coarse-graining level).
         centered : bool, optional
             Whether the resulting per-atom sequences are considered centered. Center positions is chars_per_atom // 2.
-            Default is False.
+            Default is False. See set_atom_seqs for the implications on the parameters.
         """
         if not self.couplings_set:
             raise ValueError("Couplings need to be set before sequence assignment.")
