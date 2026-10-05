@@ -204,7 +204,8 @@ def check_fene(
     abort = np.flatnonzero(active & (rlogarg <= FENE_RLOGARG_ABORT))
     linear = np.flatnonzero(active & (rlogarg > FENE_RLOGARG_ABORT) & (rlogarg < FENE_RLOGARG_MIN))
     regular = np.flatnonzero(active & (rlogarg >= FENE_RLOGARG_MIN))
-    units = ' The FENE coefficients are in simulation units (they are not rescaled by -ul).'
+    units = (' Rc, R0 and the bond lengths are in simulation units; the FENE coefficients are given in nm '
+             '(and kT/nm^2) and rescaled with the unit length.')
     if len(abort) > 0:
         msg = (
             f'{len(abort)} bond(s) are stretched so far beyond the FENE limit (Rc = {Rc:g}, '

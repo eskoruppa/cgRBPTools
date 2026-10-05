@@ -40,10 +40,11 @@ NBP   = 400        # number of junctions (base-pair steps)
 CLOSED = True      # True -> circular chain with couplings across the seam
 
 # ---- groundstate (equilibrium configuration of every junction) -------------
-GROUNDSTATE = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 3.4])
+GROUNDSTATE = np.array([0.0, 0.0, 0.0, 0.0, 0.0, disc_len])
 
 # ---- local (offset-0) stiffness -------------------------------------------
-LOCAL_STIFFNESS = np.array([A / disc_len, A / disc_len, C / disc_len, 200, 200, 200])
+# rotations in kT/rad^2, translations in kT/nm^2 (200 kT per disc length squared)
+LOCAL_STIFFNESS = np.array([A / disc_len, A / disc_len, C / disc_len, 200 / disc_len**2, 200 / disc_len**2, 200 / disc_len**2])
 
 # ---- nonlocal couplings (optional) ----------------------------------------
 NONLOCAL_COUPLINGS = None
@@ -53,10 +54,12 @@ DECIMALS    = 4      # decimal places in the written coefficients
 MASS        = 1.0    # mass per bead
 UNIT_LENGTH = 3.4    # nm per length unit (1.0 -> keep nm)
 UNIT_ENERGY = 1.0    # kT per energy unit
+# All parameters are given in nm and kT; set_unit_length/set_unit_energy convert them
+# (including the FENE coefficients) to simulation units.
 
 # ---- optional FENE bond ----------------------------------------------------
-# Set to (K, Rc, R0) to add a native FENE bond, or None to disable.
-FENE_COEFFS = np.array([500, 1.15*disc_len, 1.30*disc_len])  # (K, Rc, R0) for the FENE bond
+# Set to (K, Rc, R0) in kT/nm^2 and nm to add a native FENE bond, or None to disable.
+FENE_COEFFS = np.array([500 / disc_len**2, 1.15*disc_len, 1.30*disc_len])
 
 # ---- configuration ---------------------------------------------------------
 CONFIGURATION_METHOD = "circular" if CLOSED else "straight"
@@ -75,12 +78,7 @@ INCLUDE_BPS_TRIADS = False   # draw base-pair-step triads (ChimeraX only)
 
 def main() -> None:
 
-
-    LOCAL_STIFFNESS[3:] *= 1 / UNIT_LENGTH**2  # convert to stiffness per length unit
     NBPS = NBP if CLOSED else NBP - 1
-
-    if FENE_COEFFS is not None:
-        FENE_COEFFS[1:] *= 1 / UNIT_LENGTH  # convert to length units
 
     base_fn = Path(OUTPUT_BASENAME)
 

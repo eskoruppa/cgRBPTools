@@ -450,7 +450,7 @@ class ConfBuilder:
         poses: np.ndarray,
         topology: CGRBPTopology | None = None,
         mass: float = 1,
-        validate: bool = False,
+        validate: bool = True,
     ) -> CGRBPConf:
         """
         Create a DNA configuration from SE3 poses (transformation matrices).
@@ -600,6 +600,476 @@ class ConfBuilder:
         poses[:, :3, 3] /= topology.unit_length
         return cls.from_poses(poses, topology, mass=mass)
     
+    @classmethod
+    def from_tracepoints(
+        cls,
+        topology: CGRBPTopology,
+        tracepoints: np.ndarray,
+        *,
+        excess_link: float | None = None,
+        link_reference: str = 'lk0',
+        mass: float = 1,
+        conf_units: str = 'nm',
+        rescale: bool = False,
+        max_fene: float | str | None = 'auto',
+        tangent_persistence: float | np.ndarray = 1.0,
+        smoothing: float | None = None,
+        first_triad: np.ndarray | None = None,
+        twist_correction: bool = True,
+        return_info: bool = False,
+    ) -> CGRBPConf | tuple:
+        """
+        Generate a DNA configuration along a smooth curve through tracepoints.
+
+        The beads are placed along a cubic spline through the tracepoints and carry the intrinsic
+        twist and rise of the topology's groundstate; tilt, roll, shift and slide are ignored (see
+        tracepoints.tracepoints_to_poses). The number of beads and whether the chain is closed
+        follow from the topology. Consecutive beads are spaced in proportion to the rise: without
+        rescale all steps are stretched or compressed by the same factor, the first bead sits at
+        the first tracepoint (for closed curves with smoothing, at its smoothed position) and, for
+        open chains, the last bead at the last one; with rescale the curve is scaled about the
+        centroid of the tracepoints such that the distances equal the rise. For coarse-grained
+        topologies the curve is the path of the beads, i.e. of the base pairs
+        k*composite_size + center_pos.
+
+        The excess link adds twist on top of the intrinsic twist:
+
+        - open chains: 2 pi excess_link / nbps of twist per step, as in ConfBuilder.straight.
+        - closed chains, link_reference='lk0' (default): the linking number becomes
+          round(Lk0 + excess_link), with Lk0 the total intrinsic twist in turns (the twist of
+          every step taken in [-pi, pi]), as for ConfBuilder.circular. The twist then also
+          compensates the writhe of the path. Unless the path is planar, the linking number of
+          the ring is evaluated with PyLk, in a time quadratic in the number of beads (about
+          0.4 s for 1,000 and 25 s for 8,000 beads).
+        - closed chains, link_reference='path': excess_link whole turns are added to the
+          twist-relaxed ring for this path, as in tracepoints_to_poses. Both references agree for
+          gently bent planar paths; otherwise they differ by about Wr + E (see below).
+
+        With excess_link=None (default) no twist is added. A closed chain then becomes the
+        twist-relaxed ring for this path, closed by the smallest uniform change of the twist; its
+        linking number is the integer closest to Lk0 + Wr + E, with Wr the writhe of the path and
+        E the total turning of the bent steps about the tangents beyond their twist (negligible
+        for gently bent paths, up to about pi*bend^2/8 per step).
+
+        Parameters
+        ----------
+        topology : CGRBPTopology
+            Topology with groundstate. Its number of beads, closed flag, unit length and FENE
+            coefficients define the chain.
+        tracepoints : array-like
+            Positions with shape (N, 3), or positions and tangents with shape (N, 2, 3), in
+            conf_units. Tangents may have any length; tangents marked NaN are free. A closed curve
+            that repeats its first tracepoint at the end has the repetition removed.
+        excess_link : float, optional
+            Excess linking number (see above). Has to be an integer for closed chains with
+            link_reference='path'. Default is None.
+        link_reference : str, optional
+            Reference of the excess link of closed chains, 'lk0' (default) or 'path' (see above).
+            Ignored for open chains and without excess link.
+        mass : float, optional
+            Mass of each bead. Must be positive. Default is 1.
+        conf_units : str, optional
+            Length unit of the tracepoints, smoothing and max_fene, and of the lengths in the
+            diagnostics and messages (except FENE coefficients and bond lengths in FENE messages,
+            which are in simulation units): 'nm' (default), 'angstrom' or 'sim' (multiples of
+            topology.unit_length).
+        rescale : bool, optional
+            Scale the curve such that the distances between consecutive beads equal the rise.
+            Default is False.
+        max_fene : float, 'auto' or None, optional
+            Limit on stretched bonds. 'auto' (default): for topologies with FENE bonds no bond may
+            exceed Rc + (R0 - Rc) * sqrt(1 - conf_checks.FENE_RLOGARG_MIN), the longest bond for
+            which LAMMPS evaluates the FENE term regularly; no limit without FENE bonds. A number
+            limits the stretch of every step beyond its rise (distance - rise, in conf_units), as
+            in tracepoints_to_poses. None: no limit. Bonds in the FENE regime of the topology are
+            reported as warnings in any case.
+        tangent_persistence : float or np.ndarray, optional
+            How far the curve follows a prescribed tangent before it turns, scalar or one value
+            per tracepoint. Default is 1.
+        smoothing : float, optional
+            For noisy tracepoints: root-mean-square distance (conf_units) by which the curve may
+            miss the tracepoints. Requires at least 4 tracepoints. Default is None.
+        first_triad : np.ndarray, optional
+            Triad (3x3, columns are the axes) of the first bead. Its third axis prescribes the
+            tangent at the first tracepoint. Default is the triad of ConfBuilder.straight for the
+            tangent of the curve.
+        twist_correction : bool, optional
+            Match the twist of every step exactly. Default is True.
+        return_info : bool, optional
+            Also return the diagnostics. Default is False.
+
+        Returns
+        -------
+        CGRBPConf or tuple[CGRBPConf, TracepointInfo]
+            Configuration with positions in simulation units (multiples of topology.unit_length),
+            and the diagnostics if return_info is set, with lengths in conf_units. All warnings
+            are issued as UserWarning and listed in TracepointInfo.warnings.
+
+        Raises
+        ------
+        TypeError
+            If topology is not a CGRBPTopology instance.
+        ValueError
+            If topology.groundstate is not set, an argument is invalid, the curve cannot be traced
+            (see tracepoints_to_poses), the beads are spaced implausibly far from the rise
+            without rescale, a bond exceeds the FENE limit, or the excess link adds more than 90
+            degrees of twist per step. With max_fene='auto' also if the FENE coefficients of the
+            topology are not available or its groundstate bonds already exceed the FENE limit.
+        ImportError
+            If the linking number of a non-planar ring is required (link_reference='lk0') and
+            PyLk is not available.
+
+        Notes
+        -----
+        With link_reference='lk0' the turns added to the twist-relaxed ring are
+        TracepointInfo.excess_twist_per_step * nbp / (2 pi); the diagnostics describe the returned
+        ring, except for the warning on the closure of the twist-relaxed ring. Steps whose twist
+        would exceed 180 degrees in magnitude (composite steps with an intrinsic twist close to
+        180 degrees, e.g. 5 base pairs per bead) appear twisted the other way round in the
+        rotation-vector convention, although
+        their deformation relative to the groundstate carries the intended twist; this is
+        reported as a warning. The elastic energy of the configuration can be assessed with
+        conf_checks.energy_check.
+
+        lmp_input -dlk (conf_checks.linking_number) counts the linking number from the twist of
+        the junctions relative to the full groundstate, whereas link_reference='lk0' counts the
+        linking number of the ribbon along the bead frames, as for ConfBuilder.circular. The two
+        counts differ by an offset that grows with the number of beads, most at composite sizes
+        of a few base pairs per bead. For long rings -dlk may therefore report the result as one
+        or more turns off (see KNOWN_ISSUES.md).
+        """
+        import warnings
+
+        from .conf_checks import (
+            CONF_LK_INTEGER_TOL,
+            CONF_MAX_ADDED_TWIST,
+            FENE_RLOGARG_MIN,
+            bond_vectors,
+            check_fene,
+        )
+        from .conf_import import CONF_UNITS, CONF_UNITS_TO_NM, _listed
+        from .topology import LMP_TOPOL_GROUNDSTATE_MAX_FACTOR, LMP_TOPOL_GROUNDSTATE_MIN_FACTOR
+        from .tracepoints import TRACE_FENE_TOL, TRACE_INTEGER_TOL, tracepoints_to_poses
+
+        # Validate topology
+        if not isinstance(topology, CGRBPTopology):
+            raise TypeError(f"topology must be a CGRBPTopology instance, got {type(topology)}")
+        if topology.groundstate is None:
+            raise ValueError("topology.groundstate is not set. Call topology.set_params() first.")
+        if topology.nbp <= 0:
+            raise ValueError(f"topology.nbp must be positive, got {topology.nbp}")
+
+        # Validate mass
+        if not isinstance(mass, (int, float)) or mass <= 0:
+            raise ValueError(f"mass must be a positive number, got {mass}")
+
+        # Validate options
+        if conf_units not in CONF_UNITS:
+            raise ValueError(
+                f"Unknown length unit '{conf_units}'. Expected one of: {', '.join(CONF_UNITS)}."
+            )
+        if link_reference not in ('lk0', 'path'):
+            raise ValueError(f"link_reference must be 'lk0' or 'path', got {link_reference!r}.")
+        auto_fene = isinstance(max_fene, str)
+        if auto_fene and max_fene != 'auto':
+            raise ValueError(f"max_fene must be a number, 'auto' or None, got {max_fene!r}.")
+        closed = topology.closed
+        if excess_link is not None:
+            if isinstance(excess_link, bool) or not isinstance(
+                excess_link, (int, float, np.integer, np.floating)
+            ):
+                raise ValueError(
+                    f"excess_link must be a finite number or None, got {excess_link!r}."
+                )
+            excess_link = float(excess_link)
+            if not np.isfinite(excess_link):
+                raise ValueError(f"excess_link must be finite or None, got {excess_link}.")
+            fractional = abs(excess_link - round(excess_link)) > TRACE_INTEGER_TOL
+            if closed and link_reference == 'path' and fractional:
+                raise ValueError(
+                    f"For closed chains with link_reference='path' excess_link counts whole turns "
+                    f"added to the twist-relaxed ring and has to be an integer (got "
+                    f"{excess_link:g}). With link_reference='lk0' the linking number becomes "
+                    f"round(Lk0 + excess_link)."
+                )
+
+        # FENE limit: the longest bond for which LAMMPS evaluates the FENE term regularly
+        fene = cls._tracepoint_fene_limits(topology)
+        fene_bound = None
+        if auto_fene:
+            max_fene = None
+            if topology.has_fene and fene is None:
+                raise ValueError(
+                    'The topology uses FENE bonds, but their coefficients are not available. '
+                    'Pass max_fene explicitly, or max_fene=None to build the configuration '
+                    'without a limit.'
+                )
+            if fene is not None:
+                rc, r0 = fene
+                fene_bound = rc + (r0 - rc) * np.sqrt(1.0 - FENE_RLOGARG_MIN)
+                model_bond = np.linalg.norm(topology.groundstate[:, 3:], axis=1).max()
+                if model_bond > fene_bound:
+                    raise ValueError(
+                        f'The bonds of the groundstate reach {model_bond:.4g}, beyond '
+                        f'{fene_bound:.4g}, the longest bond for which LAMMPS evaluates the FENE '
+                        f'term of the topology regularly (Rc = {rc:g}, R0 = {r0:g}). These lengths '
+                        f'are in simulation units (unit length {topology.unit_length:g} nm); set_fene '
+                        f'takes Rc and R0 in nm. Pass max_fene=None to build the configuration anyway.'
+                    )
+
+        # the curve is built in conf_units, such that the lengths passed in and reported (apart
+        # from the FENE messages) are in that unit; to_sim converts them to simulation units
+        if conf_units == 'sim':
+            to_sim = 1.0
+        else:
+            to_sim = CONF_UNITS_TO_NM[conf_units] / topology.unit_length
+        # the twist of a step is defined up to full turns; reduced by the nearest whole number of
+        # turns (principal values in [-pi, pi] stay as they are) it counts as in the linking number
+        # of the beads
+        twist = topology.groundstate[:, 2]
+        twist = twist - 2 * np.pi * np.round(twist / (2 * np.pi))
+        rise = topology.groundstate[:, 5]
+        groundstate = np.column_stack([twist, rise / to_sim])
+        options = dict(
+            num_poses=topology.nbp,
+            closed=closed,
+            rescale=rescale,
+            max_fene=max_fene,
+            tangent_persistence=tangent_persistence,
+            smoothing=smoothing,
+            first_triad=first_triad,
+            twist_correction=twist_correction,
+            return_info=True,
+        )
+        issued = []
+
+        def note(msg: str) -> None:
+            issued.append(msg)
+            warnings.warn(msg, UserWarning, stacklevel=3)
+
+        # Relative to Lk0 the twist-relaxed ring is built first; its linking number sets the turns
+        # to add. Its warnings are held back until it is known which ring is returned, and are
+        # issued if anything fails before.
+        lk0_reference = closed and excess_link is not None and link_reference == 'lk0'
+        turns = 0.0 if excess_link is None or lk0_reference else excess_link
+        if lk0_reference:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter('always')
+                try:
+                    poses, info = tracepoints_to_poses(
+                        tracepoints, groundstate, excess_link=turns, **options
+                    )
+                    failure = None
+                except Exception as e:
+                    failure = e
+            if failure is not None:
+                for warning in caught:
+                    note(str(warning.message))
+                raise failure
+            pending = list(info.warnings)
+        else:
+            poses, info = tracepoints_to_poses(
+                tracepoints, groundstate, excess_link=turns, **options
+            )
+            issued.extend(info.warnings)
+            pending = []
+        poses[:, :3, 3] *= to_sim
+
+        try:
+            if not rescale:
+                hint = cls._tracepoint_unit_hint(info.stretch, conf_units, topology.unit_length)
+                low, high = LMP_TOPOL_GROUNDSTATE_MIN_FACTOR, LMP_TOPOL_GROUNDSTATE_MAX_FACTOR
+                if not low <= info.stretch <= high:
+                    check = f"Check the length unit of the tracepoints (conf_units='{conf_units}')."
+                    raise ValueError(
+                        f'The poses are spaced {info.stretch:.4g} times the intrinsic rise, '
+                        f'implausibly far from the rise of the model (accepted without rescale: '
+                        f'{low:g} to {high:g}). {hint or check} Set rescale=True to scale the '
+                        f'curve to the intrinsic rise.'
+                    )
+                if hint is not None:
+                    note(hint)
+
+            if fene_bound is not None:
+                lengths = np.linalg.norm(bond_vectors(poses[:, :3, 3], closed), axis=1)
+                over = np.flatnonzero(lengths > fene_bound * (1.0 + TRACE_FENE_TOL))
+                if len(over) > 0:
+                    raise ValueError(
+                        f'The poses are spaced {info.stretch:.4g} times the intrinsic rise, which '
+                        f'stretches {len(over)} bond(s) to up to {lengths.max():.4g}, beyond '
+                        f'{fene_bound:.4g}, the longest bond for which LAMMPS evaluates the FENE '
+                        f'term of the topology regularly (Rc = {rc:g}, R0 = {r0:g}; simulation '
+                        f'units; 0-based bond indices: {_listed(over)}). Set rescale=True to '
+                        f'scale the curve to the intrinsic rise, or pass max_fene explicitly '
+                        f'(largest stretch beyond the rise in {conf_units}; None removes the '
+                        f'limit).'
+                    )
+            if fene is not None:
+                for msg in check_fene(poses, *fene, closed=closed, abort_is_error=False):
+                    note(msg)
+
+            if lk0_reference:
+                lk0 = twist.sum() / (2 * np.pi)
+                lk = cls._tracepoint_linking_number(poses, twist, info.closure_twist)
+                if abs(lk - round(lk)) > CONF_LK_INTEGER_TOL:
+                    note(
+                        f'The linking number of the twist-relaxed ring ({lk:.3f}) is not close to '
+                        f'an integer: its steps bend strongly or twist by almost 180 degrees. The '
+                        f'excess link may be off by a turn.'
+                    )
+                turns = round(lk0 + excess_link) - round(lk)
+                if turns != 0:
+                    # same positions, other twist: the warnings of the returned ring replace those
+                    # of the twist-relaxed ring, apart from its closure
+                    closure = 'Closing the relaxed ring'
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore')
+                        poses, info = tracepoints_to_poses(
+                            tracepoints, groundstate, excess_link=turns, **options
+                        )
+                    poses[:, :3, 3] *= to_sim
+                    pending = [msg for msg in pending if msg.startswith(closure)] + [
+                        msg for msg in info.warnings if not msg.startswith(closure)
+                    ]
+        except Exception:
+            for msg in pending:
+                note(msg)
+            raise
+        for msg in pending:
+            note(msg)
+
+        # twist added to every step (closure of the ring and excess link)
+        if closed:
+            added = (info.closure_twist + 2 * np.pi * turns) / topology.nbp
+        else:
+            added = info.excess_twist_per_step
+        if abs(added) > CONF_MAX_ADDED_TWIST:
+            msg = (
+                f'The excess link adds {np.degrees(added):.1f} degrees of twist per step (limit '
+                f'{np.degrees(CONF_MAX_ADDED_TWIST):.0f} degrees).'
+            )
+            if lk0_reference:
+                msg += (
+                    " Relative to Lk0 the twist also compensates the writhe of the path; "
+                    "link_reference='path' counts the excess link relative to the twist-relaxed "
+                    "ring for this path."
+                )
+            raise ValueError(msg)
+        flipped = np.flatnonzero(np.abs(twist + added) > np.pi)
+        if len(flipped) > 0:
+            # with the intrinsic twist in [-pi, pi], all such steps lie on the side of the added
+            # twist
+            direction = 'less' if added > 0 else 'more'
+            note(
+                f'The twist of {len(flipped)} step(s) exceeds 180 degrees in magnitude (0-based '
+                f'steps: {_listed(flipped)}). In the rotation-vector convention these steps appear '
+                f'twisted the other way round: linking numbers evaluated from the bead frames by '
+                f'the shortest rotation (e.g. PyLk triads2link) count up to {len(flipped)} turn(s) '
+                f'{direction}, whereas the elastic model, which evaluates deformations relative to '
+                f'the groundstate, sees the intended twist.'
+            )
+
+        info.warnings = issued
+        conf = cls.from_poses(poses, topology, mass=mass)
+        if return_info:
+            return conf, info
+        return conf
+
+    @staticmethod
+    def _tracepoint_fene_limits(topology: CGRBPTopology) -> tuple[float, float] | None:
+        """
+        FENE onset Rc and divergence R0 of the topology (simulation units), or None if it has no
+        FENE bonds or their coefficients are not available.
+        """
+        if not topology.has_fene:
+            return None
+        rc, r0 = getattr(topology, 'fene_Rc', None), getattr(topology, 'fene_R0', None)
+        if rc is not None and r0 is not None:
+            return float(rc), float(r0)
+        # topologies read from a database keep (k, Rc, R0) only in their bond types
+        coeffs = [
+            bondtype.extra for bondtype in getattr(topology, 'bondtypes', [])
+            if bondtype.extra is not None and len(bondtype.extra) == 3
+        ]
+        if not coeffs:
+            return None
+        coeffs = np.array(coeffs, dtype=float)
+        return float(coeffs[:, 1].min()), float(coeffs[:, 2].min())
+
+    @staticmethod
+    def _tracepoint_unit_hint(stretch: float, conf_units: str, unit_length: float) -> str | None:
+        """Hint at a length unit in which the curve through the tracepoints matches the chain."""
+        from .conf_import import CONF_UNITS, CONF_UNITS_TO_NM
+        from .tracepoints import TRACE_WARN_STRETCH
+
+        if abs(stretch - 1.0) <= TRACE_WARN_STRETCH:
+            return None
+
+        def to_nm(unit: str) -> float:
+            return unit_length if unit == 'sim' else CONF_UNITS_TO_NM[unit]
+
+        for unit in CONF_UNITS:
+            matched = abs(stretch * to_nm(unit) / to_nm(conf_units) - 1.0) <= TRACE_WARN_STRETCH
+            if unit != conf_units and matched:
+                return (
+                    f"If the tracepoints were given in {unit} (conf_units='{unit}'), the curve "
+                    f"through them would match the length of the chain. Check the length unit of "
+                    f"the tracepoints."
+                )
+        return None
+
+    @staticmethod
+    def _tracepoint_linking_number(
+        poses: np.ndarray, twist: np.ndarray, closure_twist: float
+    ) -> float:
+        """
+        Linking number of a twist-relaxed ring built by tracepoints_to_poses (no excess link), every
+        step counted with its intended twist (intrinsic twist plus closure_twist / nbp).
+
+        A planar ring (beads and tangents in one plane) has no writhe: its linking number is the
+        total angle by which the frames turn about the tangents relative to parallel transport,
+        each step taken on the branch of its intended twist. The sum of the twist itself would miss
+        it, since a bent step turns by more than its twist (by up to about pi*bend^2/8). Otherwise
+        the linking number is that of the ribbon along the first triad axes, evaluated with PyLk.
+        """
+        from .conf_checks import bond_vectors
+        from .tracepoints import _parallel_transport, _wrap
+
+        pos = poses[:, :3, 3]
+        target = twist + closure_twist / len(twist)
+        _, sv, vt = np.linalg.svd(pos - pos.mean(axis=0), full_matrices=False)
+        # the tangents have to lie in the plane as well (three beads always do)
+        tangents_in_plane = np.abs(poses[:, :3, 2] @ vt[2]).max() <= 1e-8
+        if sv[2] <= 1e-10 * sv[0] and tangents_in_plane:
+            x, y, z = poses[:, :3, 0], poses[:, :3, 1], poses[:, :3, 2]
+            # the turning angle of a step is minus its transport angle relative to the frames
+            transport, _ = _parallel_transport(z, x, y, closed=True)
+            return float(np.sum(target + _wrap(-transport - target)) / (2 * np.pi))
+        try:
+            from ..evals.PyLk import pylk
+        except ImportError as e:
+            raise ImportError(
+                "Counting the excess link of a closed topology relative to Lk0 "
+                "(link_reference='lk0') requires the linking number of the ring and thus the PyLk "
+                "submodule (cgrbptools/evals/PyLk). link_reference='path' and excess_link=None do "
+                "not need it."
+            ) from e
+        # a ribbon far narrower than the distance between the beads
+        width = 0.02 * np.median(np.linalg.norm(bond_vectors(pos, closed=True), axis=1))
+        # Between consecutive beads the ribbon turns the shortest way, which miscounts steps
+        # twisted by about 180 degrees or more (strongly bent ones already below 180 degrees). The
+        # frames are therefore turned back about the tangents by the intended twist, leaving small
+        # turns per step, and the whole turns taken out are added back.
+        turns = round(target.sum() / (2 * np.pi))
+        step = target - (target.sum() - 2 * np.pi * turns) / len(target)
+        angle = np.r_[0.0, np.cumsum(step)[:-1]]
+        cos, sin = np.cos(angle)[:, None], np.sin(angle)[:, None]
+        x, y = poses[:, :3, 0], poses[:, :3, 1]
+        triads = poses[:, :3, :3].copy()
+        triads[:, :, 0] = cos * x - sin * y
+        triads[:, :, 1] = sin * x + cos * y
+        return float(pylk.triads2link(pos, triads, radius=width, closed=True)) + turns
+
     @classmethod
     def from_positions_orientations(
         cls,

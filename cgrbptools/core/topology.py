@@ -798,9 +798,17 @@ class CGRBPTopology:
     >>> topology = CGRBPTopology.read_database('output.db', decimals=6)
     >>> print(f"Loaded topology with {topology.nbp} base pairs")
     
-    Enable FENE bonds for enhanced stability:
-    
-    >>> topology.set_fene(k=30.0, Rc=1.5, R0=2.0)
+    Enable FENE bonds for enhanced stability. By default k is given in kT/nm^2 and Rc and R0
+    in nm, and they are rescaled with the unit length and unit energy like the stiffness
+    matrix. For beads 3.4 nm apart (k = 200 kT per bead length squared, Rc = 1.1 and
+    R0 = 1.35 bead lengths):
+
+    >>> topology.set_fene(k=17.3, Rc=3.74, R0=4.59)
+
+    With sim_units=True the coefficients are given in simulation units and never rescaled:
+
+    >>> topology.set_unit_length(3.4)
+    >>> topology.set_fene(k=200, Rc=1.1, R0=1.35, sim_units=True)
     
     Notes
     -----
@@ -871,7 +879,14 @@ class CGRBPTopology:
         self.extra_bond = None
         self.extra_angle = None
         self.extra_dihedral = None
-        
+
+        # FENE coefficients in simulation units (set_fene)
+        self.fene_k = None
+        self.fene_Rc = None
+        self.fene_R0 = None
+        self.fene_coeffs = None
+        self.fene_sim_units = False   # set_fene(..., sim_units=True): not rescaled with the units
+
         self.unit_length = 1.0
         self.unit_energy = 1.0
 
@@ -1063,17 +1078,61 @@ class CGRBPTopology:
         unit_energy = 1.0 if energy_rescaled else self.unit_energy
         rescale = RescaleUnits(length_factor=unit_length, energy_factor=unit_energy)
         return rescale.rescale_stiffness(self.stiffness_matrix)
-    
-    
+
+
+    def get_fene(self, length_rescaled: bool = True, energy_rescaled: bool = True) -> np.ndarray | None:
+        """
+        Get the FENE coefficients (k, Rc, R0), or None if no FENE bond is set.
+
+        The coefficients are stored internally in rescaled units. The original can be retrieved by setting
+        length_rescaled and energy_rescaled to False.
+
+        Parameters
+        ----------
+        length_rescaled : bool, optional
+            If True (default), return the coefficients in rescaled units.
+            If False, return them in native physical units (the original unit_length).
+        energy_rescaled : bool, optional
+            If True (default), return the coefficients in rescaled units.
+            If False, return them in native physical units (the original unit_energy).
+
+        Returns
+        -------
+        np.ndarray or None
+            Array (k, Rc, R0). Units: k [energy]/[length]^2, Rc and R0 [length].
+        """
+        if self.fene_coeffs is None:
+            return None
+
+        unit_length = 1.0 if length_rescaled else self.unit_length
+        unit_energy = 1.0 if energy_rescaled else self.unit_energy
+        rescale = RescaleUnits(length_factor=unit_length, energy_factor=unit_energy)
+        return rescale.rescale_fene(self.fene_coeffs)
+
+
+    def _rescale_units(self, rescale: RescaleUnits) -> None:
+        """
+        Rescale everything that is stored in simulation units (groundstate, stiffness matrix and
+        FENE coefficients, unless set with sim_units=True) and rebuild the couplings.
+        """
+        self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
+        if self.fene_coeffs is not None and not self.fene_sim_units:
+            self._store_fene(rescale.rescale_fene(self.fene_coeffs))
+        self._init_couplings()
+
+
     def set_unit_length(self, unit_length: float) -> None:
         """
         Set the unit length for the topology.
+
+        Rescales the groundstate, the stiffness matrix and the FENE coefficients (set_fene)
+        from the current unit length to the new one.
 
         Parameters
         ----------
         unit_length : float
             Unit length in nanometers. Must be positive.
-            
+
         Raises
         ------
         TypeError
@@ -1091,9 +1150,7 @@ class CGRBPTopology:
         if self.couplings_set:
             rescale_factor = self.unit_length / unit_length
             if rescale_factor != 1.0:
-                rescale = RescaleUnits(length_factor=rescale_factor)
-                self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
-                self._init_couplings()
+                self._rescale_units(RescaleUnits(length_factor=rescale_factor))
         self.unit_length = unit_length
         
   
@@ -1107,6 +1164,9 @@ class CGRBPTopology:
     def set_unit_energy(self, unit_energy: float) -> None:
         """
         Set the unit energy for the topology.
+
+        Rescales the stiffness matrix and the FENE stiffness (set_fene) from the current unit
+        energy to the new one.
 
         Parameters
         ----------
@@ -1130,9 +1190,7 @@ class CGRBPTopology:
         if self.couplings_set:
             rescale_factor = self.unit_energy / unit_energy
             if rescale_factor != 1.0:
-                rescale = RescaleUnits(length_factor=1.0, energy_factor=rescale_factor)
-                self.groundstate,self.stiffness_matrix = rescale.rescale_model(self.groundstate,self.stiffness_matrix)
-                self._init_couplings()
+                self._rescale_units(RescaleUnits(length_factor=1.0, energy_factor=rescale_factor))
         self.unit_energy = unit_energy
         
     def reset_unit_energy(self) -> None:
@@ -1212,45 +1270,88 @@ class CGRBPTopology:
         self,
         k: float,
         Rc: float,
-        R0: float
+        R0: float,
+        sim_units: bool = False,
     ) -> None:
         """
         Set FENE bond parameters.
 
         The FENE (Finite Extensible Nonlinear Elastic) interaction provides a
         nonlinear elastic bond that diverges as the bond length approaches its
-        maximum extension, preventing unphysical overstretching.
+        maximum extension, preventing unphysical overstretching. Bond style rbpfene
+        adds E(r) = -1/2 k (R0-Rc)^2 ln[1 - (r-Rc)^2/(R0-Rc)^2] for bonds of length r >= Rc.
+
+        By default the coefficients are, like the groundstate and the stiffness matrix,
+        given in physical units and stored in simulation units: they are converted with
+        the current unit length and unit energy, and rescaled by later calls of
+        set_unit_length() and set_unit_energy(). With sim_units=True they are given in
+        simulation units and used as they are: they are neither converted nor rescaled
+        by later unit changes. The attributes fene_k, fene_Rc and fene_R0 hold the values
+        in simulation units; get_fene() returns them in either.
 
         Parameters
         ----------
         k : float
-            FENE stiffness.
+            FENE stiffness in kT/nm^2 (simulation units with sim_units=True), the harmonic
+            stiffness at the onset (E ~ k (r-Rc)^2 / 2 for r slightly above Rc).
         Rc : float
-            Distance at which the FENE interaction becomes active.
+            Distance in nm (simulation units with sim_units=True) at which the FENE
+            interaction becomes active.
         R0 : float
-            Maximum allowed bond extension.
+            Maximum allowed bond extension in nm (simulation units with sim_units=True).
+        sim_units : bool, optional
+            If False (default), k, Rc and R0 are given in kT/nm^2 and nm and rescaled with
+            the units. If True, they are given in simulation units and never rescaled.
+
+        Examples
+        --------
+        FENE term for beads 3.4 nm apart that acts beyond 1.1 and diverges at 1.35 bead
+        lengths, with k = 200 kT per bead length squared:
+
+        >>> topology.set_fene(k=200 / 3.4**2, Rc=1.1 * 3.4, R0=1.35 * 3.4)   # kT/nm^2, nm
+        >>> topology.set_unit_length(3.4)
+        >>> topology.get_fene()
+        array([200.  ,   1.1 ,   1.35])
+
+        The same coefficients in simulation units, kept as given whenever the units change:
+
+        >>> topology.set_fene(k=200, Rc=1.1, R0=1.35, sim_units=True)
         """
-        
-        if hasattr(self, "fene_k") and hasattr(self, "fene_Rc") and hasattr(self, "fene_R0") \
-            and self.fene_k == k and self.fene_Rc == Rc and self.fene_R0 == R0:
-                return
-        
+
+        if not isinstance(sim_units, bool):
+            raise TypeError("sim_units must be a bool.")
+        if k <= 0:
+            raise ValueError(f'Fene stiffness smaller or equal to zero (currently k = {k}).')
+        if R0 <= Rc:
+            raise ValueError(f'Fene Rc needs to be smaller than R0 (currently: Rc = {Rc} R0 = {R0}).')
+
+        if sim_units:
+            coeffs = (k, Rc, R0)
+        else:
+            to_sim = RescaleUnits(length_factor=1.0 / self.unit_length, energy_factor=1.0 / self.unit_energy)
+            coeffs = to_sim.rescale_fene((k, Rc, R0))
+        self.fene_sim_units = sim_units
+        # Rebuild couplings if they already exist
+        if self._store_fene(coeffs) and self.couplings_set:
+            self._init_couplings()
+
+
+    def _store_fene(self, coeffs) -> bool:
+        """
+        Store the FENE coefficients (k, Rc, R0), given in simulation units, without rebuilding the
+        couplings. Returns False if these coefficients are already set.
+        """
+        k, Rc, R0 = (float(c) for c in coeffs)
+        if self.fene_coeffs == [k, Rc, R0]:
+            return False
+
         self.fene_k = k
         self.fene_Rc = Rc
         self.fene_R0 = R0
-        
-        if self.fene_k <= 0:
-            raise ValueError(f'Fene stiffness smaller or equal to zero (currently k = {k}).')
-        if self.fene_R0 <= self.fene_Rc:
-            raise ValueError(f'Fene Rc needs to be smaller or equal to R0 (currently: Rc = {Rc} R0 = {R0}).')
-        
         self.bond_style = CGRBP_FENE_BOND_STYLE
         self.fene_coeffs = [self.fene_k,self.fene_Rc,self.fene_R0]
         self.extra_bond = np.array(self.fene_coeffs,dtype=np.float64)
-
-        # Rebuild couplings if they already exist
-        if self.couplings_set:
-            self._init_couplings()
+        return True
     
     
     def remove_fene(self) -> None:
@@ -1263,6 +1364,7 @@ class CGRBPTopology:
         self.fene_k = None
         self.fene_Rc = None
         self.fene_R0 = None
+        self.fene_sim_units = False
         self.bond_style = CGRBP_DEFAULT_BOND_STYLE
         self.fene_coeffs = None
         self.extra_bond = None
@@ -1282,8 +1384,12 @@ class CGRBPTopology:
                     subtract_groundstate: bool = False,
                     # validation: bool = False,
                   ) -> None:
-        """ 
+        """
             Set interaction parameters (groundstate, stiffness and coupling ranges)
+
+            The groundstate and stiffness matrix are given in nm and kT. The extra_* coefficients
+            are used as given (simulation units) and are not rescaled by set_unit_length() or
+            set_unit_energy(); set the FENE coefficients with set_fene() instead.
         """
         
         
@@ -1412,7 +1518,10 @@ class CGRBPTopology:
             also controls whether nonlocal couplings wrap around the ends. If None,
             the current topology setting is used.
         extra_bond, extra_angle, extra_dihedral : np.ndarray, optional
-            Additional per-type coefficients, forwarded to :meth:`set_params`.
+            Additional per-type coefficients, forwarded to :meth:`set_params`. They
+            are used as given (simulation units) and are not rescaled by
+            :meth:`set_unit_length` or :meth:`set_unit_energy`; set the FENE
+            coefficients with :meth:`set_fene` instead.
         subtract_groundstate : bool, optional
             Forwarded to :meth:`set_params`. Default is False.
 

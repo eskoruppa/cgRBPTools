@@ -53,6 +53,24 @@ python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -conf gs -vis
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -conf circ -vis
 ```
 
+### Example Notebooks
+
+Two Jupyter notebooks in the repository root show how to generate the parameters and initial
+configurations from Python instead of with `lmp_input`:
+
+- [example_homog_input.ipynb](example_homog_input.ipynb): **homogeneous** (sequence-independent)
+  molecules. One groundstate vector and one local stiffness block, set from bending, twist and
+  stretching stiffnesses, are assigned to all junctions with `CGRBPTopology.homogeneous_params`.
+- [example_seqdep_input.ipynb](example_seqdep_input.ipynb): **sequence-dependent** molecules. The
+  coarse-grained parameters of a sequence are generated with `polycg.gen_params`, the stiffness of
+  selected degrees of freedom is rescaled with `rescale_stiff`, and the topology is set up with
+  `CGRBPTopology.set_params`.
+
+Both notebooks include optional FENE bonds and unit rescaling, write the database (`.db`) and LAMMPS
+data (`.data`) files, and build the initial configuration in three ways: a built-in configuration
+type (`ConfBuilder.build`), a trefoil knot traced through tracepoints
+(`ConfBuilder.from_tracepoints`), and externally generated poses (`ConfBuilder.from_poses`).
+
 ---
 
 ## Command-Line Interface: `lmp_input`
@@ -70,7 +88,7 @@ python -m cgrbptools.lmp_input [options]
 | `-seqfn`, `--sequence_file` | Path to DNA sequence file (`.seq` extension). Output filename derived from this if `-o` not specified. |
 | `-seq`, `--sequence` | DNA sequence as string (alternative to `-seqfn`). Requires `-o` to specify output filename. |
 | `-m`, `--model` | DNA model for parameter generation. Choices: `cgnaplus` (default), `md`, `crystal`. |
-| `-o`, `--output_basename` | Base filename for output files (required if using `-seq`). |
+| `-o`, `--output_basename` | Base filename for output files (required if using `-seq`). Defaults to the `-seqfn` path without `.seq`, followed by `_cg<N>` with N the composite size, also for `-cg 1` (e.g. `Examples/200bp_cg10`). |
 
 ### Coarse-Graining Options
 
@@ -85,7 +103,8 @@ python -m cgrbptools.lmp_input [options]
 | Option | Description |
 |--------|-------------|
 | `-closed` | Generate closed (circular) topology with periodic boundary couplings. |
-| `-fene K Rc R0` | Include the FENE term of bond style `rbpfene`: stiffness K, onset distance Rc (the term acts on bonds longer than Rc) and maximum bond length R0. The values are in simulation units: they are **not** rescaled by `-ul`. |
+| `-fene K Rc R0`, `--bond_fene_coeffs K Rc R0` | Include the FENE term of bond style `rbpfene`: stiffness K in kT/nm², onset distance Rc in nm (the term acts on bonds longer than Rc) and maximum bond length R0 in nm. Like the other parameters, the values are converted to simulation units with `-ul` and `-ue` (see [FENE Coefficients](#fene-coefficients)). |
+| `-fu`, `--fene_units` | Units of the `-fene` values: `nm` (default, as above) or `sim` for simulation units, which are used as given (not rescaled by `-ul`/`-ue`). Requires `-fene`. |
 
 ### Subsection Selection
 
@@ -113,6 +132,7 @@ python -m cgrbptools.lmp_input [options]
 | `-conffn`, `--configuration_file` | Import an externally generated configuration instead of building one (see [Importing a Configuration](#importing-a-configuration)). Mutually exclusive with `-conf`. |
 | `-dlk`, `--excess_link` | Excess linking number. For `-conf straight`/`circular` the excess link of the generated configuration (default: 0). For imported closed configurations, see [Linking number](#linking-number). No effect for `-conf ground_state` and imported open configurations (a warning is printed). |
 | `-mass` | Mass of atoms in output (default: 1.0). |
+| `-be`, `--box_extend` | Margin added on all sides of the bounding box of the configuration, as a fraction of its largest extent; the box is then made cubic (default: 0.2). Also accepted as `--bext` and `--box-extend`. |
 
 ### Importing a Configuration
 
@@ -177,12 +197,12 @@ linking number.
 | Option | Description |
 |--------|-------------|
 | `-dec`, `--decimals` | Number of decimal places for output formatting (default: 4). |
-| `-nodup`, `--remove_duplicate` | Remove duplicate coupling styles (default: True). |
-| `-xyz`, `--gen_xyz` | Generate XYZ coordinate file. |
-| `-pdb`, `--gen_pdb` | Generate PDB structure file. |
-| `-vis`, `--visualize_cgrbp` | Generate ChimeraX visualization script (`.cxc`). |
-| `-bpst`, `--include_bps_triads` | Include base pair step triads in visualization (requires `-vis`). |
-| `-coeffs`, `--safe_coeffs` | Save stiffness matrix and shape to file. |
+| `-keepdup`, `--keep_duplicates` | Give every bond, angle and dihedral its own coupling type. By default, interactions with identical coefficients share one type. |
+| `-xyz`, `--gen_xyz` | Generate XYZ file of the bead positions. |
+| `-pdb`, `--gen_pdb` | Generate PDB structure file at base-pair resolution. Not needed with `-vis`, which writes the structure file itself. |
+| `-vis`, `--visualize_cgrbp` | Generate ChimeraX visualization script (`.cxc`) together with the files it loads (see [Visualization Files](#visualization-files)). |
+| `-bpst`, `--include_bps_triads` | Include base pair step triads in visualization (requires `-vis`; only for `-cg` > 1). |
+| `-coeffs`, `--safe_coeffs` | Save stiffness matrix and groundstate (in simulation units) to file (see [Coefficient Files](#coefficient-files-_stiffnpz-_gsnpy)). |
 
 ### Performance Options
 
@@ -215,8 +235,12 @@ python -m cgrbptools.lmp_input -seqfn Examples/1kbp -conf gs
 # Coarse-grain to 5 bp resolution with extended coupling range
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 5 -cr 2 -conf gs
 
-# Generate circular DNA with FENE bonds (FENE parameters in units of 3.4 nm, the length of a bead)
-python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 200 1.1 1.35 -ul 3.4 -conf circ
+# Generate circular DNA with FENE bonds (K in kT/nm^2, Rc and R0 in nm; with -ul 3.4, the length of a
+# bead, the simulation uses K ≈ 200, Rc = 1.1 and R0 = 1.35 in units of 3.4 nm)
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 17.3 3.74 4.59 -ul 3.4 -conf circ
+
+# The same FENE term given in simulation units (multiples of the 3.4 nm unit length)
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -fene 200 1.1 1.35 -fu sim -ul 3.4 -conf circ
 
 # Import a configuration (bead or base-pair resolution, positions in nm)
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -conffn my_conf.npy
@@ -263,6 +287,9 @@ python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -closed -conf circ
 ---
 
 ## Output Files
+
+All output files share the base filename set with `-o` (by default derived from `-seqfn`, e.g.
+`Examples/200bp_cg10`) and differ in their extension or suffix.
 
 ### Database File (`.db`)
 
@@ -346,7 +373,7 @@ Dihedral Coeffs
 | `number of bonds` | Total number of bond interactions |
 | `number of angles` | Total number of angle interactions |
 | `number of dihedrals` | Total number of dihedral interactions |
-| `number of bond/angle/dihedral types` | Number of unique coefficient sets |
+| `number of bond/angle/dihedral types` | Number of coefficient sets (only distinct ones, unless `-keepdup` gives each interaction its own) |
 | `bond/angle/dihedral style` | LAMMPS interaction style (`rbp` or `rbpfene`) |
 | `subtract groundstate` | Whether groundstate is subtracted in potential (0=no) |
 | `seqs set` | Whether sequence information is included (1=yes, 0=no) |
@@ -377,8 +404,9 @@ For composite size > 1, `sequence_string` contains multiple characters (e.g., `A
 
 **Bond Coeffs**: Each line contains:
 - Type ID
+- With bond style `rbpfene` only: the FENE coefficients K, Rc and R0 (3 values, simulation units)
 - Groundstate vector (6 values: 3 rotational + 3 translational in Euler vector representation)
-- Stiffness matrix (36 values, 6×6 matrix flattened row-major)
+- Stiffness matrix (21 values: upper triangle of the symmetric 6×6 matrix, row by row)
 
 **Angle/Dihedral Coeffs**: Each line contains:
 - Type ID
@@ -395,13 +423,27 @@ Standard LAMMPS data file containing:
 
 ### Visualization Files
 
-- **`.cxc`**: ChimeraX command script for structure visualization
-- **`.pdb`**: PDB structure file for molecular viewers
-- **`.xyz`**: Simple XYZ coordinate file
+- **`.cxc`** (`-vis`): ChimeraX command script that loads the files below
+- **`.pdb`** (`-vis` or `-pdb`): structure at base-pair resolution (backmapped for `-cg` > 1). With
+  `-vis`, structures of more than 500 bp are written as `.cif` instead, and above 2000 bp split into
+  `_part1.cif`, `_part2.cif`, ...
+- **`_triads.bild`** (`-vis`): triads of the beads
+- **`_spheres.cmm`** (`-vis`, `-cg` > 1): the beads as spheres
+- **`_bps_triads.bild`** (`-vis -bpst`, `-cg` > 1): triads of all base pairs
+- **`_cg.xyz`** (`-xyz`): XYZ file of the bead positions
+
+If neither `-conf` nor `-conffn` is given, the visualization files show the ground state.
 
 ### Sequence File (`.seq`)
 
-Plain text file containing the DNA sequence (one continuous string of A, T, C, G characters).
+Plain text file containing the DNA sequence (one continuous string of A, T, C, G characters). Always
+written; it holds the sequence that was used, i.e. after `-sid`/`-eid` and `-trunc` were applied.
+
+### Coefficient Files (`_stiff.npz`, `_gs.npy`)
+
+Written only with `-coeffs`: the stiffness matrix (`_stiff.npz` if sparse, else `_stiff.npy`) and
+the groundstate (`_gs.npy`) as written to the database, i.e. in simulation units (rescaled with
+`-ul`/`-ue`).
 
 ### Imported Configuration (`_conf.npy`)
 
@@ -422,7 +464,7 @@ recovered (or replayed) later. For example, the invocation
 python -m cgrbptools.lmp_input -seqfn Examples/200bp -sr 0.5 0 1 -sr 0.71 2 -sr 0.5 5
 ```
 
-produces `Examples/200bp.rescale` containing
+produces `Examples/200bp_cg1.rescale` containing
 
 ```
 -sr 0.5 0 1 -sr 0.71 2 -sr 0.5 5
@@ -460,6 +502,7 @@ topology = CGRBPTopology(
 | `stiffness_matrix` | Stiffness matrix (6N×6N) |
 | `unit_length` | Length unit in nm |
 | `unit_energy` | Energy unit in kT |
+| `fene_k`, `fene_Rc`, `fene_R0` | FENE coefficients in simulation units (None without FENE) |
 | `composite_size` | Base pairs per coarse-grained bead |
 | `sequence` | DNA sequence string |
 
@@ -476,8 +519,10 @@ topology.set_sequence(sequence, chars_per_atom=1, centered=False)
 topology.set_unit_length(1.0)  # nm
 topology.set_unit_energy(1.0)  # kT
 
-# Enable FENE bonds
-topology.set_fene(K=200, Rc=1.1, R0=1.35)
+# Enable FENE bonds (k in kT/nm^2, Rc and R0 in nm; rescaled with the unit length and energy)
+topology.set_fene(k=17.3, Rc=3.74, R0=4.59)
+# ... or in simulation units, used as given and never rescaled
+topology.set_fene(k=200, Rc=1.1, R0=1.35, sim_units=True)
 
 # Serialize to database file
 topology.write_database('output.db')
@@ -488,6 +533,7 @@ topology = CGRBPTopology.read_database('output.db')
 # Retrieve parameters (optionally unscaled)
 gs = topology.get_groundstate(length_rescaled=True)
 stiff = topology.get_stiffness_matrix(length_rescaled=True, energy_rescaled=True)
+fene = topology.get_fene(length_rescaled=False, energy_rescaled=False)  # (k, Rc, R0) in kT/nm^2 and nm
 ```
 
 ### CGRBPConf
@@ -542,10 +588,19 @@ conf = ConfBuilder.ground_state(topology, mass=1.0)
 
 # Import an external configuration (bead or base-pair resolution, positions in nm)
 conf = ConfBuilder.from_file(topology, 'my_conf.npy', conf_units='nm')
+
+# Trace a smooth curve through tracepoints (shape (N, 3), or (N, 2, 3) with tangents; nm)
+conf = ConfBuilder.from_tracepoints(topology, tracepoints, rescale=True)
 ```
 
 The functions behind the import (loading, validation, matching, checks) are in
 `cgrbptools.core.conf_import` and `cgrbptools.core.conf_checks`.
+
+`from_tracepoints` places the beads along a cubic spline through the tracepoints with the intrinsic
+twist and rise of the groundstate (see `cgrbptools.core.tracepoints.tracepoints_to_poses`). For closed
+topologies, `excess_link=None` (default) gives the twist-relaxed ring for the path; a number sets the
+linking number to round(Lk0 + excess_link) as in `circular`, or, with `link_reference='path'`, adds
+that many whole turns to the twist-relaxed ring.
 
 #### Configuration Types
 
@@ -582,6 +637,31 @@ When `-ue VALUE` is specified:
 - All stiffness matrix entries are scaled by `1/VALUE` (the parameters are expressed in
   a new energy unit equal to `VALUE` kT)
 - **Example**: `-ue 0.592` expresses energies in units of 0.592 kT (≈ kcal/mol at 300 K)
+
+### FENE Coefficients
+
+The FENE coefficients (`-fene K Rc R0`, `set_fene(k, Rc, R0)`) are given in kT/nm² and nm and
+are rescaled together with the groundstate and the stiffness matrix. Bond style `rbpfene` adds
+
+```
+E(r) = -1/2 K (R0 - Rc)^2 ln[1 - (r - Rc)^2 / (R0 - Rc)^2]    for r >= Rc
+```
+
+so Rc and R0 are lengths, and K, the harmonic stiffness at the onset (E ≈ K (r - Rc)²/2), has the
+units of the translational stiffness entries:
+
+- `Rc → Rc / unit_length`, `R0 → R0 / unit_length`
+- `K → K · unit_length² / unit_energy`
+
+`set_fene` converts the values with the current units, so it may be called before or after
+`set_unit_length()`/`set_unit_energy()`. The topology stores them in simulation units (`fene_k`,
+`fene_Rc`, `fene_R0`, and the bond coefficients); `get_fene(length_rescaled=False,
+energy_rescaled=False)` returns them in kT/nm² and nm.
+
+`set_fene(k, Rc, R0, sim_units=True)` (`-fene ... --fene_units sim` in `lmp_input`) takes the
+coefficients in simulation units instead. They are used as given and are not rescaled when the
+units change, so the call may also come before or after
+the unit setters (`fene_sim_units` records this mode; a later `set_fene` without it switches back).
 
 ### Per-Dimension Stiffness Rescaling (`-sr` / `-racg`)
 
@@ -754,7 +834,7 @@ The plots display:
 Generate ChimeraX scripts with:
 
 ```bash
-python -m cgrbptools.lmp_input -seqfn Examples/200bp -vis -bpst
+python -m cgrbptools.lmp_input -seqfn Examples/200bp -cg 10 -vis -bpst
 ```
 
 ---

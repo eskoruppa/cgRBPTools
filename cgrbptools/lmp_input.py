@@ -117,6 +117,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate cgRBP input files")
     parser.add_argument(
+        '-m',       
+        '--model',              
+        type=str, default = 'cgnaplus', choices=['cgnaplus','md','crystal'],
+        help='DNA model for parameter generation (default: cgnaplus)')
+    parser.add_argument(
         '-seqfn',   
         '--sequence_file',      
         type=str, default = None,
@@ -126,11 +131,6 @@ if __name__ == "__main__":
         '--sequence',           
         type=str, default = None,
         help='DNA sequence as string (alternative to -seqfn). Requires -o to specify output filename.')
-    parser.add_argument(
-        '-m',       
-        '--model',              
-        type=str, default = 'cgnaplus', choices=['cgnaplus','md','crystal'],
-        help='DNA model for parameter generation (default: cgnaplus)')
     parser.add_argument(
         '-cg',      
         '--composite_size',     
@@ -172,8 +172,16 @@ if __name__ == "__main__":
         type=float,
         metavar=("K", "Rc", "R0"),
         default=None,
-        help="Include native FENE bond in rbp bond couplings. Requires three arguments (K, Rc, R0).",)
-    
+        help="Include native FENE bond in rbp bond couplings. Requires three arguments (K, Rc, R0), "
+             "in kT/nm^2 and nm unless --fene_units sim is given.",)
+    parser.add_argument(
+        '-fu',
+        '--fene_units',
+        choices=['nm', 'sim'],
+        default=None,
+        help='Units of the -fene coefficients: nm (default; K in kT/nm^2, Rc and R0 in nm, converted '
+             'to simulation units with -ul and -ue) or sim (simulation units, used as given).')
+
     parser.add_argument(
         '-nc',      
         '--no_crop',            
@@ -225,10 +233,11 @@ if __name__ == "__main__":
         action='store_true',
         help='Include base pair step triads in visualization (requires -vis)') 
     parser.add_argument(
-        '-nodup',    
-        '--remove_duplicate',
-        type=bool, default=True, 
-        help='Remove duplicate coupling styles: bonds styles, angle styles, dihedral styles (default: True)') 
+        '-keepdup',
+        '--keep_duplicates',
+        action='store_true',
+        help='Give every bond, angle and dihedral its own coupling type, even if its coefficients '
+             'are identical to those of another (by default, identical coefficient sets share one type)')
         
     parser.add_argument(
         '-ul', 
@@ -389,6 +398,8 @@ if __name__ == "__main__":
             '-trunc/--truncate_to_match is not available for closed topologies (-closed). Closed '
             'configurations have to match the sequence exactly.'
         )
+    if args.fene_units is not None and args.bond_fene_coeffs is None:
+        parser.error('-fu/--fene_units applies only to FENE coefficients (-fene/--bond_fene_coeffs).')
 
     ##################################################
     ########## Limit number of threads ###############
@@ -580,11 +591,11 @@ if __name__ == "__main__":
     topol = CGRBPTopology(
         coupling_range=args.coupling_range,
         decimals=args.decimals,
-        check_existing_types=args.remove_duplicate,
+        check_existing_types=not args.keep_duplicates,
         closed=args.closed
     )
     if include_fene:
-        topol.set_fene(*bond_fene_coeffs)
+        topol.set_fene(*bond_fene_coeffs, sim_units=args.fene_units == 'sim')
     topol.set_params(shape,stiff)
     topol.set_unit_energy(args.unit_energy)
     topol.set_unit_length(args.unit_length)
@@ -699,33 +710,7 @@ if __name__ == "__main__":
     ########## Generate XYZ ##########################
     if args.gen_xyz:
         conf.visualize_xyz(base_fn)
-    
-    # ##################################################
-    # ########## Generate ChimeraX script ##############
-    # if args.visualize_cgrbp:
-    #     if conf is None:
-    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
-    
-    #     if args.composite_size > 1:
-    #         bead_radius = args.composite_size*0.34*0.5
-    #         bp_poses = dna_backmap(conf,verbose=True)
-    #     else:
-    #         bead_radius = 0
-    #         bp_poses = conf.poses
-    #     visualize_chimerax(base_fn, seq, args.composite_size, poses=bp_poses, start_id=topol.center_pos, bead_radius=bead_radius,include_bps_triads=args.include_bps_triads) 
         
-    # ##################################################
-    # ########## Generate PDB ##########################
-    # if args.gen_pdb and not args.visualize_cgrbp:
-    #     if conf is None:
-    #         conf = ConfBuilder.build(topol, 'ground_state', mass=args.mass, excess_link=args.excess_link)
-    #     visualize_pdb(base_fn, seq, poses=conf.poses_in_nm)
-     
-    # ##################################################
-    # ########## Generate XYZ ##########################
-    # if args.gen_xyz:
-    #     visualize_xyz(base_fn, args.composite_size, poses=conf.poses, start_id=topol.center_pos)
-    
     ##################################################
     ########## Save coefficients #####################
     if args.safe_coeffs:

@@ -68,7 +68,25 @@ class RescaleUnits:
             M_rescaled *= self.energy_factor
             M_rescaled /= scale_matrix
             return M_rescaled
-        
+
+    def rescale_fene(self, fene) -> np.ndarray:
+        """
+        Rescale the FENE coefficients (K, Rc, R0) of bond style rbpfene.
+
+        The FENE energy E(r) = -1/2 K (R0-Rc)^2 ln[1 - (r-Rc)^2/(R0-Rc)^2] (r >= Rc) makes Rc and
+        R0 lengths and K, the harmonic stiffness at the onset (E ~ K (r-Rc)^2 / 2), an energy per
+        length^2, like the translational entries of the stiffness matrix.
+        """
+        fene = np.asarray(fene, dtype=float)
+        if fene.shape != (3,):
+            raise ValueError("FENE coefficients must be the three values (K, Rc, R0).")
+        K, Rc, R0 = fene
+        return np.array([
+            self.energy_factor * K / self.length_factor**2,
+            self.length_factor * Rc,
+            self.length_factor * R0,
+        ])
+
     def rescale_model(
         self,
         X0: np.ndarray,

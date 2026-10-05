@@ -141,17 +141,30 @@ def test_unit_energy(tmp_path):
 
 
 def test_fene_and_strict_checks(tmp_path, gs_poses):
-    fene = ['-fene', 200, 1.1, 1.35]
+    fene = ['-fene', 200, 1.1, 1.35]   # kT/nm^2 and nm: R0 is far below the bond length of 3.4 nm
     res = lmp(tmp_path, '-cg', 10, '-closed', '-conf', 'circ', *fene, '-o', tmp_path / 'b')
     assert res.returncode == 0 and 'LAMMPS aborts' in res.stderr
     res = lmp(tmp_path, '-cg', 10, '-closed', '-conffn', gs_poses['closed_cg10'], *fene, '-o', tmp_path / 'i')
     assert res.returncode != 0 and 'Bad RBP FENE bond' in res.stderr
-    res = lmp(tmp_path, '-cg', 10, '-closed', '-conffn', gs_poses['closed_cg10'], *fene, '-ul', 3.4, '-o', tmp_path / 'u')
+    # K = 200, Rc = 1.1 and R0 = 1.35 in units of the bond length of 3.4 nm
+    fene_nm = ['-fene', 200 / 3.4**2, 1.1 * 3.4, 1.35 * 3.4]
+    res = lmp(tmp_path, '-cg', 10, '-closed', '-conffn', gs_poses['closed_cg10'], *fene_nm, '-ul', 3.4, '-o', tmp_path / 'u')
     assert res.returncode == 0, res.stderr
+    assert '200.0 1.1 1.35 ' in (tmp_path / 'u.db').read_text()
     pytest.importorskip('cgrbptools.evals.PyLk.pylk')
     res = lmp(tmp_path, '-cg', 10, '-closed', '-conffn', gs_poses['closed_cg10'], '-dlk', 3,
               '--strict_conf_check', '-o', tmp_path / 's')
     assert res.returncode != 0 and '--strict_conf_check' in res.stderr
+
+
+def test_fene_units(tmp_path):
+    nm = lmp(tmp_path, '-cg', 10, '-fene', 200 / 3.4**2, 1.1 * 3.4, 1.35 * 3.4, '-ul', 3.4, '-ue', 0.5, '-o', tmp_path / 'nm')
+    sim = lmp(tmp_path, '-cg', 10, '-fene', 400, 1.1, 1.35, '-fu', 'sim', '-ul', 3.4, '-ue', 0.5, '-o', tmp_path / 'sim')
+    assert nm.returncode == 0 and sim.returncode == 0, nm.stderr + sim.stderr
+    assert '400.0 1.1 1.35 ' in (tmp_path / 'sim.db').read_text()
+    assert (tmp_path / 'nm.db').read_bytes() == (tmp_path / 'sim.db').read_bytes()
+    res = lmp(tmp_path, '-cg', 10, '-fu', 'sim', '-o', tmp_path / 'x')
+    assert res.returncode == 2 and '--fene_units applies only' in res.stderr
 
 
 def test_excess_link_warnings(tmp_path, gs_poses):
@@ -159,3 +172,21 @@ def test_excess_link_warnings(tmp_path, gs_poses):
     assert res.returncode == 0 and 'no effect for an imported open configuration' in res.stderr
     res = lmp(tmp_path, '-cg', 10, '-conf', 'gs', '-dlk', 2, '-o', tmp_path / 'g')
     assert res.returncode == 0 and 'no effect for -conf ground_state' in res.stderr
+
+
+def test_keep_duplicates(tmp_path):
+    # all base pair steps of a homopolymer have the same coefficients
+    for name, flags in (('merged', []), ('kept', ['-keepdup'])):
+        res = run_lmp_input(['-seq', 'A' * 20, '-m', 'crystal', *flags, '-o', tmp_path / name], cwd=tmp_path)
+        assert res.returncode == 0, res.stderr
+
+    def header(name):
+        text = (tmp_path / f'{name}.db').read_text().split('\n\n')[0]
+        return {key: int(value) for key, value in (line.split(':') for line in text.splitlines())
+                if value.strip().isdigit()}
+
+    merged, kept = header('merged'), header('kept')
+    assert merged['number of bonds'] == kept['number of bonds'] == 19
+    assert merged['number of bond types'] == 1
+    assert kept['number of bond types'] == 19
+    assert kept['number of angle types'] == kept['number of angles']
