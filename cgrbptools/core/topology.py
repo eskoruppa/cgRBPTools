@@ -2332,12 +2332,12 @@ class CGRBPTopology:
         return topology
     
 
-    
     def write_database(
         self,
         filename: str | Path,
         add_extension: bool = True,
         include_connectivity: bool = True,
+        write_import: bool = True,
         ) -> None:
         """Write topology to a database file.
         
@@ -2365,19 +2365,25 @@ class CGRBPTopology:
             their counts in the metadata. If False, only writes coefficient definitions
             and metadata. This is useful when only coefficient data is needed without
             the full topology structure. Default is True.
-        
+        write_import : bool, optional
+            If True, additionally writes a small text file with the LAMMPS input
+            lines (style and coeff commands) that load the interactions from the
+            database file. The file has the same basename as the database file with
+            the extension '.db_import'. See database_import_string(). Default is True.
+
         Returns
         -------
         None
-        
+
         Notes
         -----
-        The coefficients are written in rescaled units. The unit_length and unit_energy 
+        The coefficients are written in rescaled units. The unit_length and unit_energy
         values in the metadata indicate what physical units these rescaled units correspond to.
-        
+
         See Also
         --------
         read_database : Read a database file and reconstruct topology.
+        database_import_string : LAMMPS input lines written to the '.db_import' file.
         """
         filename = Path(filename)
         
@@ -2449,4 +2455,42 @@ class CGRBPTopology:
 
         with open(filename, 'w') as f:
             f.write(''.join(lines))
-             
+
+        if write_import:
+            with open(filename.with_suffix('.db_import'), 'w') as f:
+                f.write(self.database_import_string(filename.name))
+
+    def database_import_string(self, dbfile: str | Path) -> str:
+        """LAMMPS input lines that load the interactions from a database file.
+
+        Generates the bond, angle and dihedral style and coeff commands that
+        declare all interaction types via the ``dbfile`` keyword. Sections with
+        no interaction types are omitted, consistent with coeffs_string().
+
+        Parameters
+        ----------
+        dbfile : str or Path
+            Database filename as it should appear in the LAMMPS input file,
+            i.e. relative to the directory LAMMPS is run from.
+
+        Returns
+        -------
+        str
+            Input file lines ready to be included in a LAMMPS input script.
+        """
+        sections = [
+            ('Bonds', 'bond', self.bond_style, self.num_bond_types),
+            ('Angles', 'angle', self.angle_style, self.num_angle_types),
+            ('Dihedrals', 'dihedral', self.dihedral_style, self.num_dihedral_types),
+        ]
+        lines = []
+        for title, kind, style, num_types in sections:
+            if num_types == 0:
+                continue
+            if lines:
+                lines.append('\n')
+            lines.append('#############################################\n')
+            lines.append(f'# {title}\n')
+            lines.append(f'{kind + "_style":<15}{style}\n')
+            lines.append(f'{kind}_coeff * dbfile {dbfile} 1\n')
+        return ''.join(lines)

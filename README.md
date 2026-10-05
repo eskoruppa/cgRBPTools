@@ -524,7 +524,8 @@ topology.set_fene(k=17.3, Rc=3.74, R0=4.59)
 # ... or in simulation units, used as given and never rescaled
 topology.set_fene(k=200, Rc=1.1, R0=1.35, sim_units=True)
 
-# Serialize to database file
+# Serialize to database file (also writes output.db_import with the LAMMPS
+# style/coeff lines that load the interactions; disable with write_import=False)
 topology.write_database('output.db')
 
 # Load from database file
