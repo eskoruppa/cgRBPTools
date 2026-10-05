@@ -19,7 +19,7 @@ The package interfaces with the **CG-RBP** LAMMPS extension, which implements cu
 Clone the repository (recursive submodules required for the [PolyCG](cgrbptools/PolyCG/README.md) library and the [cgNA+](https://lcvmwww.epfl.ch/cgDNA/) parameter database):
 
 ```bash
-git clone --recurse-submodules -j8 git@github.com:eskoruppa/cgRBPTools.git
+git clone --recurse-submodules -j8 https://github.com/eskoruppa/cgRBPTools.git
 cd cgRBPTools
 ```
 
